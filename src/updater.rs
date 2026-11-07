@@ -6,7 +6,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
 use ed25519_dalek::{
-    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey, LineEnding},
+    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey},
     Signature, Signer, SigningKey, VerifyingKey,
 };
 use fs2::FileExt;
@@ -92,8 +92,8 @@ pub fn keygen(private_key: &Path, public_key: &Path) -> Result<()> {
         bail!("Key paths must be distinct and neither file may already exist");
     }
     let signing = SigningKey::generate(&mut OsRng);
-    let secret = signing.to_pkcs8_pem(LineEnding::LF)?;
-    let public = signing.verifying_key().to_public_key_pem(LineEnding::LF)?;
+    let secret = signing.to_pkcs8_pem(Default::default())?;
+    let public = signing.verifying_key().to_public_key_pem(Default::default())?;
     write_new(private_key, secret.as_bytes(), 0o600)?;
     write_new(public_key, public.as_bytes(), 0o644)?;
     Ok(())
@@ -193,18 +193,25 @@ pub fn run(args: UpdateArgs) -> Result<UpdateOutcome> {
     sync_directory(&stage.path)?;
     let release_dir = releases.join(format!("v{candidate}"));
     if release_dir.exists() {
-        // Never silently trust a previous failed/staged release.
-        bail!("Release directory {} already exists; inspect it before retrying", release_dir.display());
+        // A transient health failure may have left this signed version staged.
+        // Reuse only an exact, protected match to the freshly verified download.
+        ensure_root_protected(&release_dir, true)?;
+        let existing = release_dir.join("jcb-api");
+        ensure_root_protected(&existing, false)?;
+        if digest_file(&existing)? != digest_file(&stage.path.join("jcb-api"))? {
+            bail!("Existing release {} differs from the signed download; inspect it before proceeding", release_dir.display());
+        }
+    } else {
+        fs::rename(&stage.path, &release_dir)?;
+        sync_directory(&releases)?;
     }
-    fs::rename(&stage.path, &release_dir)?;
-    sync_directory(&releases)?;
     let desired = PathBuf::from("releases").join(format!("v{candidate}"));
     let activation = activate_with_rollback(&args.install_dir, &previous, &desired, &current, &candidate, |version| {
         restart_and_check(&args.service, &args.socket, version)
     });
     if let Err(error) = activation {
-        // Preserve the failed verified release for inspection, with clear retry guidance.
-        return Err(error.context(format!("Verified failed release retained at {}; inspect/remove it before retrying", release_dir.display())));
+        // Preserve the failed verified release; the next timer run can retry it.
+        return Err(error.context(format!("Verified release retained at {}; the next update attempt will verify and retry it", release_dir.display())));
     }
     Ok(UpdateOutcome::Updated { previous: current, current: candidate })
 }
@@ -466,6 +473,9 @@ fn check_health(socket: &Path, expected: &Version) -> Result<()> {
     let (headers, body) = response.split_once("\r\n\r\n").context("Invalid health response")?;
     if !headers.lines().next().is_some_and(|line| line.starts_with("HTTP/1.0 200 ") || line.starts_with("HTTP/1.1 200 ")) { bail!("Health check returned an error"); }
     let data: serde_json::Value = serde_json::from_str(body)?;
+    if data.get("status").and_then(|v| v.as_str()) != Some("ok") {
+        bail!("Service reports an unhealthy status");
+    }
     if data.get("version").and_then(|v| v.as_str()) != Some(expected.to_string().as_str()) {
         bail!("Healthy process has a different version");
     }
@@ -612,9 +622,26 @@ mod tests {
             let (mut connection, _) = listener.accept().unwrap();
             let mut request = [0; 512];
             let _ = connection.read(&mut request).unwrap();
-            connection.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"version\":\"1.0.0\"}").unwrap();
+            connection.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\",\"version\":\"1.0.0\"}").unwrap();
         });
         assert!(check_health(&path, &Version::new(1, 1, 0)).is_err());
+        thread.join().unwrap();
+        Ok(())
+    }
+
+    #[test]
+    fn health_check_accepts_the_expected_healthy_version() -> Result<()> {
+        use std::os::unix::net::UnixListener;
+        let dir = tempdir()?;
+        let path = dir.path().join("health.sock");
+        let listener = UnixListener::bind(&path)?;
+        let thread = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0; 512];
+            let _ = connection.read(&mut request).unwrap();
+            connection.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\",\"version\":\"1.1.0\"}").unwrap();
+        });
+        check_health(&path, &Version::new(1, 1, 0))?;
         thread.join().unwrap();
         Ok(())
     }

@@ -383,7 +383,7 @@ need systemctl
 need apt-get
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq openssl nginx
-need curl; need jq; need openssl; need sha256sum
+need curl; need jq; need openssl; need sha256sum; need flock
 
 # Release/config parents must not allow the runtime account (or another ordinary
 # user) to replace a path later traversed by the root-owned updater.
@@ -399,6 +399,12 @@ for secure_path in "$INSTALL_DIR" "$CONFIG_DIR"; do
     done
 done
 [[ $(realpath -m -- "$STATE_DIR") == "$STATE_DIR" ]] || die 'Symlink components are not allowed in the state directory'
+install -d -m 0755 -o root -g root "$INSTALL_DIR"
+[[ ! -L $INSTALL_DIR/.update.lock ]] || die 'Update lock must not be a symlink'
+exec 9>"$INSTALL_DIR/.update.lock"
+chmod 0600 "$INSTALL_DIR/.update.lock"
+flock -n 9 || die 'Another installer or updater is already running'
+install -m 0600 "$PUBLIC_KEY_FILE" "$TEMP_DIR/trusted-public.pem"
 
 # Do not silently leave a legacy vhost serving the same name ahead of this one.
 # The operator may disable that symlink while retaining its original file.
@@ -426,9 +432,9 @@ for asset in SHA256SUMS SHA256SUMS.sig "$ASSET"; do
         "https://github.com/$REPOSITORY/releases/download/$TAG/$asset" -o "$TEMP_DIR/$asset"
 done
 [[ $(wc -c < "$TEMP_DIR/SHA256SUMS.sig") -eq 64 ]] || die 'Release signature must be 64 Ed25519 bytes'
-PUBLIC_KEY_INFO=$(openssl pkey -pubin -in "$PUBLIC_KEY_FILE" -text -noout) || die 'Invalid release public key'
+PUBLIC_KEY_INFO=$(openssl pkey -pubin -in "$TEMP_DIR/trusted-public.pem" -text -noout) || die 'Invalid release public key'
 [[ $PUBLIC_KEY_INFO == *ED25519* ]] || die 'Release key must be Ed25519'
-openssl pkeyutl -verify -pubin -inkey "$PUBLIC_KEY_FILE" -rawin -in "$TEMP_DIR/SHA256SUMS" -sigfile "$TEMP_DIR/SHA256SUMS.sig" >/dev/null || die 'Release signature verification failed'
+openssl pkeyutl -verify -pubin -inkey "$TEMP_DIR/trusted-public.pem" -rawin -in "$TEMP_DIR/SHA256SUMS" -sigfile "$TEMP_DIR/SHA256SUMS.sig" >/dev/null || die 'Release signature verification failed'
 DIGEST=$(awk -v name="$ASSET" '$2 == name && length($1) == 64 && $1 ~ /^[0-9a-f]+$/ { print $1; count++ } END { if (count != 1) exit 1 }' "$TEMP_DIR/SHA256SUMS") || die 'Signed manifest must contain exactly one matching asset'
 ACTUAL_DIGEST=$(sha256sum "$TEMP_DIR/$ASSET"); ACTUAL_DIGEST=${ACTUAL_DIGEST%% *}
 [[ $DIGEST == "$ACTUAL_DIGEST" ]] || die 'Release binary checksum verification failed'
@@ -485,9 +491,7 @@ if [[ -e $CONFIG_DIR/.env ]]; then
     install -m 0600 "$CONFIG_DIR/.env" "$CONFIG_DIR/.env.before-install"
 fi
 install -m 0640 -o root -g "$NGINX_GROUP" "$OUTPUT_DIR/jcb-api.env" "$CONFIG_DIR/.env"
-if [[ $(readlink -f "$PUBLIC_KEY_FILE") != "$CONFIG_DIR/release-public.pem" ]]; then
-    install -m 0644 -o root -g root "$PUBLIC_KEY_FILE" "$CONFIG_DIR/release-public.pem"
-fi
+install -m 0644 -o root -g root "$TEMP_DIR/trusted-public.pem" "$CONFIG_DIR/release-public.pem"
 install -m 0600 -o root -g root "$OUTPUT_DIR/install.conf" "$CONFIG_DIR/install.conf"
 if [[ -e $INSTALL_DIR/releases/$TAG/jcb-api ]]; then
     [[ ! -L $INSTALL_DIR/releases/$TAG/jcb-api ]] || die 'Release binaries must not be symlinks'
@@ -513,7 +517,7 @@ systemctl enable "$SERVICE_NAME.service"
 if ! systemctl restart "$SERVICE_NAME.service"; then note 'Service restart failed; checking health before rollback.'; fi
 healthy=false
 for ((attempt=0; attempt<30; attempt++)); do
-    if curl --fail --silent --max-time 1 --unix-socket "$API_SOCKET_PATH" http://localhost/healthz >/dev/null; then healthy=true; break; fi
+    if curl --fail --silent --max-time 1 --unix-socket "$API_SOCKET_PATH" http://localhost/healthz | jq -e --arg version "${TAG#v}" '.status == "ok" and .version == $version' >/dev/null; then healthy=true; break; fi
     sleep 1
 done
 if ! $healthy; then
@@ -521,7 +525,9 @@ if ! $healthy; then
         ln -s "$PREVIOUS_RELEASE" "$INSTALL_DIR/.current-rollback"
         mv -Tf "$INSTALL_DIR/.current-rollback" "$INSTALL_DIR/current"
         if [[ -f $CONFIG_DIR/.env.before-install ]]; then install -m 0640 -o root -g "$NGINX_GROUP" "$CONFIG_DIR/.env.before-install" "$CONFIG_DIR/.env"; fi
-        if [[ -f $TEMP_DIR/$SERVICE_NAME.service.previous ]]; then install -m 0644 "$TEMP_DIR/$SERVICE_NAME.service.previous" "/etc/systemd/system/$SERVICE_NAME.service"; fi
+        for unit in "$SERVICE_NAME.service" "$SERVICE_NAME-update.service" "$SERVICE_NAME-update.timer"; do
+            if [[ -f $TEMP_DIR/$unit.previous ]]; then install -m 0644 "$TEMP_DIR/$unit.previous" "/etc/systemd/system/$unit"; fi
+        done
         systemctl daemon-reload
         systemctl restart "$SERVICE_NAME.service"
     fi
@@ -530,18 +536,30 @@ fi
 
 install -d -m 0755 /var/lib/letsencrypt/.well-known/acme-challenge
 NGINX_TARGET="/etc/nginx/sites-available/$SERVICE_NAME"
-if [[ -e $NGINX_TARGET ]]; then cp -p -- "$NGINX_TARGET" "$NGINX_TARGET.before-install"; fi
+NGINX_HAD_PREVIOUS=false
+if [[ -e $NGINX_TARGET ]]; then cp -p -- "$NGINX_TARGET" "$NGINX_TARGET.before-install"; NGINX_HAD_PREVIOUS=true; fi
+NGINX_ENABLED="/etc/nginx/sites-enabled/$SERVICE_NAME"
+[[ ! -e $NGINX_ENABLED || -L $NGINX_ENABLED ]] || die "Refusing to replace a regular enabled-site file: $NGINX_ENABLED"
+restore_nginx() {
+    if $NGINX_HAD_PREVIOUS; then
+        cp -p -- "$NGINX_TARGET.before-install" "$NGINX_TARGET"
+        if nginx -t; then systemctl reload nginx || true; fi
+    fi
+}
 if $ENABLE_HTTPS; then INITIAL_NGINX="$OUTPUT_DIR/nginx-acme.conf"; else INITIAL_NGINX="$OUTPUT_DIR/nginx-http.conf"; fi
 install -m 0644 "$INITIAL_NGINX" "$NGINX_TARGET"
-ln -sfn "$NGINX_TARGET" "/etc/nginx/sites-enabled/$SERVICE_NAME"
-nginx -t
+ln -sfn "$NGINX_TARGET" "$NGINX_ENABLED"
+if ! nginx -t; then restore_nginx; die 'Nginx validation failed; prior vhost restored when available'; fi
 systemctl enable --now nginx
 systemctl reload nginx
 if $ENABLE_HTTPS; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends certbot
-    certbot certonly --webroot --webroot-path /var/lib/letsencrypt --domain "$DOMAIN" --email "$ACME_EMAIL" --agree-tos --non-interactive --keep-until-expiring
+    if ! certbot certonly --webroot --webroot-path /var/lib/letsencrypt --domain "$DOMAIN" --email "$ACME_EMAIL" --agree-tos --non-interactive --keep-until-expiring; then
+        restore_nginx
+        die 'Certificate enrollment failed; prior vhost restored when available, otherwise API remains closed'
+    fi
     install -m 0644 "$OUTPUT_DIR/nginx.conf" "$NGINX_TARGET"
-    nginx -t
+    if ! nginx -t; then restore_nginx; die 'HTTPS configuration validation failed; prior vhost restored when available'; fi
     systemctl reload nginx
     install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
     printf '#!/bin/sh\n/usr/bin/systemctl reload nginx\n' > /etc/letsencrypt/renewal-hooks/deploy/jcb-api-nginx
