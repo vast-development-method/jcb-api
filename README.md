@@ -7,8 +7,9 @@ private Unix socket.
 
 The service preserves the existing network and monitoring URLs and JSON response
 shapes. It runs as an unprivileged systemd service behind Nginx. Releases contain
-prebuilt Linux binaries; production servers do not need Rust, Python, Gunicorn,
-Redis, or a database. The downloaded installer is a small Bash bootstrap; the
+prebuilt Linux binaries; the API requires no Rust toolchain, Python interpreter,
+Gunicorn, Redis, or database. Optional HTTPS provisioning uses the distribution's
+Certbot package and its dependencies. The downloaded installer is a Bash bootstrap; the
 application, administration client, state engine, and updater are Rust.
 
 ## Public API

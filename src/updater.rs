@@ -104,7 +104,15 @@ pub fn keygen(private_key: &Path, public_key: &Path) -> Result<()> {
         bail!("Key paths must be distinct and neither file may already exist");
     }
     let signing = SigningKey::generate(&mut OsRng);
-    let secret = signing.to_pkcs8_pem(Default::default())?;
+    // OpenSSL's Ed25519 private-key loader expects PKCS#8 v1. Encoding a
+    // SigningKey directly includes the optional public key and produces the
+    // RFC 5958 v2 form, which OpenSSL 3.0 cannot load. Omit that optional field;
+    // both RustCrypto and OpenSSL derive the public key from the same seed.
+    let key_bytes = ed25519_dalek::pkcs8::KeypairBytes {
+        secret_key: signing.to_bytes(),
+        public_key: None,
+    };
+    let secret = key_bytes.to_pkcs8_pem(Default::default())?;
     let public = signing
         .verifying_key()
         .to_public_key_pem(Default::default())?;
@@ -752,6 +760,15 @@ mod tests {
         let public = dir.path().join("public.pem");
         keygen(&private, &public)?;
         assert_eq!(fs::metadata(&private)?.permissions().mode() & 0o777, 0o600);
+        let private_pem = fs::read_to_string(&private)?;
+        let encoded = ed25519_dalek::pkcs8::KeypairBytes::from_pkcs8_pem(&private_pem)?;
+        assert!(encoded.public_key.is_none(), "Private keys must use PKCS#8 v1");
+        let decoded = SigningKey::from_pkcs8_pem(&private_pem)?;
+        let public_pem = fs::read_to_string(&public)?;
+        assert_eq!(
+            decoded.verifying_key(),
+            VerifyingKey::from_public_key_pem(&public_pem)?
+        );
         let asset = dir.path().join("jcb-api-x86_64-unknown-linux-gnu");
         fs::write(&asset, b"test release content")?;
         let manifest = dir.path().join("SHA256SUMS");

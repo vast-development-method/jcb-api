@@ -238,6 +238,30 @@ impl Engine {
         })
     }
 
+    /// Return the prepared empty filter without parsing or encoding any JSON.
+    pub fn empty_status_response(
+        &self,
+        system: &str,
+        project: &str,
+        target: &str,
+    ) -> Result<Bytes, LookupError> {
+        let snapshot = self.inner.snapshot.load();
+        let system = snapshot
+            .prepared
+            .systems
+            .get(system)
+            .ok_or(LookupError::SystemNotFound)?;
+        let project = system
+            .projects
+            .get(project)
+            .ok_or(LookupError::ProjectNotFound)?;
+        let target = project
+            .targets
+            .get(target)
+            .ok_or(LookupError::TargetNotFound)?;
+        Ok(target.empty.clone())
+    }
+
     /// Validate the raw Authorization value exactly as the original service did.
     /// Fixed-size digests make comparisons independent of token length; every
     /// token for the system is compared, avoiding an early-match timing branch.
@@ -1009,6 +1033,14 @@ mod tests {
             .lookup(Some("s"), Some("p"), Some("t"), Some(5))
             .unwrap();
         assert_eq!(decode(empty.clone()), json!({"target":"t","network":[]}));
+        assert_eq!(
+            empty.as_ptr(),
+            engine.empty_status_response("s", "p", "t").unwrap().as_ptr()
+        );
+        assert_eq!(
+            engine.empty_status_response("s", "p", "missing"),
+            Err(LookupError::TargetNotFound)
+        );
         for status in -50..0 {
             assert_eq!(
                 empty.as_ptr(),
