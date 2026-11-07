@@ -41,6 +41,8 @@ require_text "$TEST_DIR/http/nginx.conf" 'burst=500 nodelay;'
 require_text "$TEST_DIR/http/nginx.conf" 'limit_req_status 429;'
 require_text "$TEST_DIR/http/nginx.conf" 'add_header Retry-After 1 always;'
 require_text "$TEST_DIR/http/nginx.conf" 'location = /healthz { return 404; }'
+require_text "$TEST_DIR/http/nginx.conf" 'listen 80;'
+require_text "$TEST_DIR/http/nginx.conf" 'listen [::]:80;'
 [[ $(<"$TEST_DIR/http/nginx.conf") != *set_real_ip_from* ]] || { printf 'Default trusts forwarded headers\n' >&2; exit 1; }
 
 cat "$TEST_DIR/base.conf" > "$TEST_DIR/https.conf"
@@ -90,6 +92,11 @@ if command -v nginx >/dev/null 2>&1; then
     # Nginx resolves relative includes against the main configuration directory.
     # Production's main file is /etc/nginx/nginx.conf; this isolated test moves it.
     cp /etc/nginx/proxy_params "$TEST_DIR/proxy_params"
+    # nginx -t may open listener sockets. Keep the production port assertions
+    # above, but parse a copy with unprivileged loopback listeners in CI.
+    sed -e 's/listen 80;/listen 127.0.0.1:18080;/' \
+        -e 's/listen \[::\]:80;/listen [::1]:18080;/' \
+        "$TEST_DIR/http/nginx.conf" > "$TEST_DIR/nginx-unprivileged.conf"
     cat > "$TEST_DIR/nginx-test.conf" <<EOF
 error_log $TEST_DIR/nginx-error.log;
 pid $TEST_DIR/nginx.pid;
@@ -101,7 +108,7 @@ http {
     fastcgi_temp_path $TEST_DIR/fastcgi-temp;
     uwsgi_temp_path $TEST_DIR/uwsgi-temp;
     scgi_temp_path $TEST_DIR/scgi-temp;
-    include $TEST_DIR/http/nginx.conf;
+    include $TEST_DIR/nginx-unprivileged.conf;
 }
 EOF
     nginx -t -p /etc/nginx/ -c "$TEST_DIR/nginx-test.conf"

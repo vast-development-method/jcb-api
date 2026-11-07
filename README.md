@@ -90,7 +90,10 @@ The default layout is:
 | `/run/jcb-api/admin.sock` | Private local administration socket |
 
 These defaults can all be adapted through the installer and runtime settings.
-Root-owned code and configuration are separate from service-owned state. The
+Release and configuration directories require root-owned, non-symlink ancestry
+without group/world-writable parents. Use protected paths such as `/opt` and
+`/etc`, not an administrator-writable home directory. Root-owned code and
+configuration are separate from service-owned state. The
 service cannot replace its executable. Nginx has access to the HTTP socket but
 not the private administration socket or token file.
 
@@ -111,7 +114,10 @@ files are preserved rather than overwritten. Back up these files before cutover.
 If an old Nginx virtual host already owns the same domain, save it and disable its
 symlink in `sites-enabled` before enabling the new host. Keep it available for
 rollback. Check `sudo nginx -t` and ensure only one virtual host owns the domain.
-The installer does not delete unrelated hosts or the legacy application's files.
+The installer refuses a conflicting enabled virtual host before changing the
+service. During certificate enrollment, its temporary host serves only ACME
+challenges; the API remains unavailable until HTTPS is ready. The installer does
+not delete unrelated hosts or the legacy application's files.
 
 ### Unattended installation and reconfiguration
 
@@ -173,7 +179,9 @@ sudo /opt/jcb-api/current/jcb-api --env-file /etc/jcb-api/.env \
 sudo /opt/jcb-api/current/jcb-api --env-file /etc/jcb-api/.env reload
 ```
 
-A string ID must be passed as a JSON string, for example `--id '"mirror-a"'`.
+A string ID can be passed as a JSON string, for example `--id '"mirror-a"'`.
+Bare nonnumeric strings are also accepted. Use JSON quotes to distinguish the
+string `"28"` from the numeric ID `28`.
 Deletion without `--id` applies to the explicitly selected target, project, or
 system. `--yes` acknowledges the destructive scope. A future valid monitoring
 update can recreate a deleted record; stop its sender to keep it absent.
@@ -250,7 +258,9 @@ interval (15 minutes by default, with jitter). The separate root updater verifie
 the signed manifest and digest, refuses downgrades, stages the correct native
 binary, switches the release symlink, restarts the service, and checks the running
 version through the local socket. Failed activation restores the previous
-release. A failed verified release directory is retained for inspection.
+release. A failed verified release directory is retained for inspection. A later
+update attempt can safely reuse it when its protected binary matches the newly
+verified release digest; different bytes under the same version are rejected.
 
 ```bash
 sudo /opt/jcb-api/current/jcb-api update --check
@@ -290,16 +300,17 @@ handled upstream. No benchmarks or test suites run during normal service startup
 
 ```bash
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-cargo build --release
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo build --locked --release
 bash scripts/ci-smoke.sh target/release/jcb-api
 bash scripts/test-install.sh
+bash scripts/test-release-plan.sh
 ```
 
 CI verifies the public API, dynamic growth, durable mutations, token lifecycle,
 local administration, documentation, migration behavior, installer rendering,
-and signature verification. Release builds cover x86-64 and ARM64 Linux with
+signature verification, and release/backfill tag validation. Release builds cover x86-64 and ARM64 Linux with
 musl. CI uses temporary keys for signing tests; production keys are never used in
 pull-request jobs. See [maintainer release setup](docs/releasing.md) for versioned
 publishing and backfill builds. The repository's [LICENSE](LICENSE) applies.

@@ -167,11 +167,7 @@ enum FileKind {
 impl Engine {
     /// Load existing legacy JSON files, or initialize an empty installation.
     /// This is intentionally synchronous and belongs in startup, not a handler.
-    pub fn open(
-        cache_path: PathBuf,
-        tokens_path: PathBuf,
-        max_state_bytes: usize,
-    ) -> Result<Self> {
+    pub fn open(cache_path: PathBuf, tokens_path: PathBuf, max_state_bytes: usize) -> Result<Self> {
         if max_state_bytes < 64 || max_state_bytes.checked_mul(8).is_none() {
             bail!("state size limit must be at least 64 bytes and fit the memory budget");
         }
@@ -329,8 +325,7 @@ impl Engine {
             url: text("url")?,
             status,
         };
-        let (system, project, target) =
-            (system.to_owned(), project.to_owned(), target.to_owned());
+        let (system, project, target) = (system.to_owned(), project.to_owned(), target.to_owned());
         self.change(FileKind::Catalog, move |catalog, _| {
             catalog.upsert(system, project, target, network);
             Ok(())
@@ -458,7 +453,8 @@ impl Engine {
             {
                 return Ok(false);
             }
-            let snapshot = read_snapshot(&inner.cache_path, &inner.tokens_path, inner.max_state_bytes)?;
+            let snapshot =
+                read_snapshot(&inner.cache_path, &inner.tokens_path, inner.max_state_bytes)?;
             let changed = snapshot.catalog != current.catalog || snapshot.tokens != current.tokens;
             inner.snapshot.store(Arc::new(snapshot));
             Ok(changed)
@@ -496,8 +492,14 @@ impl Engine {
             candidate.cache_stamp = current.cache_stamp;
             candidate.tokens_stamp = current.tokens_stamp;
             let (path, body) = match file {
-                FileKind::Catalog => (&inner.cache_path, serde_json::to_vec_pretty(&candidate.catalog)?),
-                FileKind::Tokens => (&inner.tokens_path, serde_json::to_vec_pretty(&candidate.tokens)?),
+                FileKind::Catalog => (
+                    &inner.cache_path,
+                    serde_json::to_vec_pretty(&candidate.catalog)?,
+                ),
+                FileKind::Tokens => (
+                    &inner.tokens_path,
+                    serde_json::to_vec_pretty(&candidate.tokens)?,
+                ),
             };
             if body.len().saturating_add(1) > inner.max_state_bytes {
                 bail!("persistent state exceeds configured size limit");
@@ -512,7 +514,8 @@ impl Engine {
             }
             inner.snapshot.store(Arc::new(candidate));
             if let Some(error) = durability_error {
-                return Err(error.context("state committed but directory durability could not be confirmed"));
+                return Err(error
+                    .context("state committed but directory durability could not be confirmed"));
             }
             Ok(result)
         })
@@ -527,23 +530,38 @@ impl Catalog {
         let system = match system_index {
             Some(index) => &mut self.systems[index],
             None => {
-                self.systems.push(System { system, projects: vec![] });
+                self.systems.push(System {
+                    system,
+                    projects: vec![],
+                });
                 self.systems.last_mut().expect("just inserted system")
             }
         };
-        let project_index = system.projects.iter().position(|item| item.project == project);
+        let project_index = system
+            .projects
+            .iter()
+            .position(|item| item.project == project);
         let project = match project_index {
             Some(index) => &mut system.projects[index],
             None => {
-                system.projects.push(Project { project, targets: vec![] });
+                system.projects.push(Project {
+                    project,
+                    targets: vec![],
+                });
                 system.projects.last_mut().expect("just inserted project")
             }
         };
-        let target_index = project.targets.iter().position(|item| item.target == target);
+        let target_index = project
+            .targets
+            .iter()
+            .position(|item| item.target == target);
         let target = match target_index {
             Some(index) => &mut project.targets[index],
             None => {
-                project.targets.push(Target { target, network: vec![] });
+                project.targets.push(Target {
+                    target,
+                    network: vec![],
+                });
                 project.targets.last_mut().expect("just inserted target")
             }
         };
@@ -558,7 +576,9 @@ impl Catalog {
             for project in &mut system.projects {
                 project.targets.retain(|target| !target.network.is_empty());
             }
-            system.projects.retain(|project| !project.targets.is_empty());
+            system
+                .projects
+                .retain(|project| !project.targets.is_empty());
         }
         self.systems.retain(|system| !system.projects.is_empty());
     }
@@ -588,7 +608,9 @@ impl Catalog {
                         if !ids.insert(serde_json::to_string(&network.id)?) {
                             bail!("duplicate network ID in cache target");
                         }
-                        if network.name.len() > MAX_FIELD_BYTES || network.url.len() > MAX_FIELD_BYTES {
+                        if network.name.len() > MAX_FIELD_BYTES
+                            || network.url.len() > MAX_FIELD_BYTES
+                        {
                             bail!("network metadata exceeds length limit");
                         }
                     }
@@ -615,11 +637,19 @@ impl Snapshot {
             }
             token_digests.insert(system.clone(), digests);
         }
-        if serde_json::to_vec(&catalog)?.len() > limit || serde_json::to_vec(&tokens)?.len() > limit {
+        if serde_json::to_vec(&catalog)?.len() > limit || serde_json::to_vec(&tokens)?.len() > limit
+        {
             bail!("state exceeds configured size limit");
         }
         let prepared = Prepared::build(&catalog, limit * 8)?;
-        Ok(Self { catalog, tokens, token_digests, prepared, cache_stamp:None, tokens_stamp:None })
+        Ok(Self {
+            catalog,
+            tokens,
+            token_digests,
+            prepared,
+            cache_stamp: None,
+            tokens_stamp: None,
+        })
     }
 }
 
@@ -637,20 +667,48 @@ impl Prepared {
                 let mut targets = HashMap::new();
                 for target in &project.targets {
                     let target_body = encode_response(target, &mut remaining)?;
-                    let empty = encode_response(&json!({"target":target.target,"network":[]}), &mut remaining)?;
+                    let empty = encode_response(
+                        &json!({"target":target.target,"network":[]}),
+                        &mut remaining,
+                    )?;
                     let mut by_status: BTreeMap<i64, Vec<&Network>> = BTreeMap::new();
                     for network in &target.network {
                         by_status.entry(network.status).or_default().push(network);
                     }
                     let mut statuses = HashMap::new();
                     for (status, network) in by_status {
-                        statuses.insert(status, encode_response(&json!({"target":target.target,"network":network}), &mut remaining)?);
+                        statuses.insert(
+                            status,
+                            encode_response(
+                                &json!({"target":target.target,"network":network}),
+                                &mut remaining,
+                            )?,
+                        );
                     }
-                    targets.insert(target.target.clone(), PreparedTarget { body:target_body, statuses, empty });
+                    targets.insert(
+                        target.target.clone(),
+                        PreparedTarget {
+                            body: target_body,
+                            statuses,
+                            empty,
+                        },
+                    );
                 }
-                projects.insert(project.project.clone(), PreparedProject { body:project_body, targets });
+                projects.insert(
+                    project.project.clone(),
+                    PreparedProject {
+                        body: project_body,
+                        targets,
+                    },
+                );
             }
-            systems.insert(system.system.clone(), PreparedSystem { body:system_body, projects });
+            systems.insert(
+                system.system.clone(),
+                PreparedSystem {
+                    body: system_body,
+                    projects,
+                },
+            );
         }
         Ok(Self { body, systems })
     }
@@ -659,12 +717,18 @@ impl Prepared {
 fn encode_response<T: Serialize>(value: &T, remaining: &mut usize) -> Result<Bytes> {
     let mut body = serde_json::to_vec(value)?;
     body.push(b'\n');
-    *remaining = remaining.checked_sub(body.len()).context("prepared responses exceed memory budget")?;
+    *remaining = remaining
+        .checked_sub(body.len())
+        .context("prepared responses exceed memory budget")?;
     Ok(Bytes::from(body))
 }
 
 fn validate_segment(value: &str) -> Result<()> {
-    if value.is_empty() || value.len() > MAX_SEGMENT_BYTES || value.contains('/') || value.chars().any(char::is_control) {
+    if value.is_empty()
+        || value.len() > MAX_SEGMENT_BYTES
+        || value.contains('/')
+        || value.chars().any(char::is_control)
+    {
         bail!("path segment must contain 1–256 bytes, without slashes or control characters");
     }
     Ok(())
@@ -674,7 +738,9 @@ fn validate_id(value: &Value) -> Result<()> {
     if value.as_i64().is_some() || value.as_u64().is_some() {
         return Ok(());
     }
-    if value.as_str().is_some_and(|id| !id.is_empty() && id.len() <= MAX_SEGMENT_BYTES && !id.chars().any(char::is_control)) {
+    if value.as_str().is_some_and(|id| {
+        !id.is_empty() && id.len() <= MAX_SEGMENT_BYTES && !id.chars().any(char::is_control)
+    }) {
         return Ok(());
     }
     bail!("monitorID must be an integer or a nonempty string of at most 256 bytes")
@@ -698,11 +764,21 @@ fn hex_digest(digest: &[u8; 32]) -> String {
 }
 
 fn prepare_path(path: &Path) -> Result<PathBuf> {
-    let filename = path.file_name().context("state path must identify a file")?;
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)
+    let filename = path
+        .file_name()
+        .context("state path must identify a file")?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
         .with_context(|| format!("cannot create state directory {}", parent.display()))?;
-    let parent = parent.canonicalize().context("cannot resolve state directory")?;
+    let parent = parent
+        .canonicalize()
+        .context("cannot resolve state directory")?;
     let path = parent.join(filename);
     if let Ok(metadata) = fs::symlink_metadata(&path) {
         if !metadata.file_type().is_file() {
@@ -713,7 +789,12 @@ fn prepare_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn seed_file(path: &Path, body: &[u8]) -> Result<()> {
-    match OpenOptions::new().write(true).create_new(true).mode(0o600).open(path) {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
         Ok(mut file) => {
             file.write_all(body)?;
             file.sync_all()?;
@@ -731,7 +812,10 @@ fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
         bail!("state file must be a regular file within the configured size limit");
     }
     let mut body = Vec::new();
-    File::open(path).context("cannot open state file")?.take(limit as u64 + 1).read_to_end(&mut body)?;
+    File::open(path)
+        .context("cannot open state file")?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut body)?;
     if body.len() > limit {
         bail!("state file exceeds configured size limit");
     }
@@ -740,14 +824,26 @@ fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
 
 fn read_catalog(path: &Path, limit: usize) -> Result<Catalog> {
     let body = read_limited(path, limit)?;
-    serde_json::from_slice(&body).map_err(|error| anyhow!("cache has invalid JSON/schema at line {}, column {}", error.line(), error.column()))
+    serde_json::from_slice(&body).map_err(|error| {
+        anyhow!(
+            "cache has invalid JSON/schema at line {}, column {}",
+            error.line(),
+            error.column()
+        )
+    })
 }
 
 fn read_tokens(path: &Path, limit: usize) -> Result<Tokens> {
     let body = read_limited(path, limit)?;
     // serde errors can include a rejected string value. Do not expose token
     // material in error messages that the application subsequently logs.
-    serde_json::from_slice(&body).map_err(|error| anyhow!("tokens have invalid JSON/schema at line {}, column {}", error.line(), error.column()))
+    serde_json::from_slice(&body).map_err(|error| {
+        anyhow!(
+            "tokens have invalid JSON/schema at line {}, column {}",
+            error.line(),
+            error.column()
+        )
+    })
 }
 
 fn read_snapshot(cache_path: &Path, tokens_path: &Path, limit: usize) -> Result<Snapshot> {
@@ -755,7 +851,8 @@ fn read_snapshot(cache_path: &Path, tokens_path: &Path, limit: usize) -> Result<
     let tokens_stamp = FileStamp::read(tokens_path)?;
     let catalog = read_catalog(cache_path, limit)?;
     let tokens = read_tokens(tokens_path, limit)?;
-    if cache_stamp != FileStamp::read(cache_path)? || tokens_stamp != FileStamp::read(tokens_path)? {
+    if cache_stamp != FileStamp::read(cache_path)? || tokens_stamp != FileStamp::read(tokens_path)?
+    {
         bail!("state files changed during reload; retaining previous snapshot and retrying later");
     }
     let mut snapshot = Snapshot::new(catalog, tokens, limit)?;
@@ -767,19 +864,35 @@ fn read_snapshot(cache_path: &Path, tokens_path: &Path, limit: usize) -> Result<
 /// Returns a post-commit durability error separately from pre-commit failures.
 fn atomic_write(path: &Path, body: &[u8]) -> Result<(Option<anyhow::Error>, Option<FileStamp>)> {
     let parent = path.parent().context("state file has no parent")?;
-    let filename = path.file_name().context("state path has no filename")?.to_string_lossy();
-    let temporary = parent.join(format!(".{filename}.{}.{}.tmp", std::process::id(), TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
+    let filename = path
+        .file_name()
+        .context("state path has no filename")?
+        .to_string_lossy();
+    let temporary = parent.join(format!(
+        ".{filename}.{}.{}.tmp",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
     let write = || -> Result<(Option<anyhow::Error>, Option<FileStamp>)> {
-        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
             .context("cannot create temporary state file")?;
         file.write_all(body).context("cannot write state")?;
         file.write_all(b"\n")?;
         file.sync_all().context("cannot synchronize state file")?;
         // Check directory sync capability before the commit point as well.
         let directory = File::open(parent).context("cannot open state directory")?;
-        directory.sync_all().context("cannot synchronize state directory")?;
+        directory
+            .sync_all()
+            .context("cannot synchronize state directory")?;
         fs::rename(&temporary, path).context("cannot atomically replace state")?;
-        let stamp = file.metadata().ok().map(|metadata| FileStamp::from_metadata(&metadata));
+        let stamp = file
+            .metadata()
+            .ok()
+            .map(|metadata| FileStamp::from_metadata(&metadata));
         Ok((directory.sync_all().err().map(anyhow::Error::from), stamp))
     };
     let result = write();
@@ -820,43 +933,90 @@ mod tests {
     fn fresh_installation_has_empty_legacy_compatible_files() {
         let (directory, engine) = fixture();
         assert_eq!(engine.snapshot(), json!({"systems":[]}));
-        assert_eq!(decode(engine.lookup(None, None, None, None).unwrap()), engine.snapshot());
+        assert_eq!(
+            decode(engine.lookup(None, None, None, None).unwrap()),
+            engine.snapshot()
+        );
         assert!(!engine.authorized("community", ""));
-        assert_eq!(fs::metadata(directory.path().join("tokens.json")).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(engine.lookup(Some("missing"), None, None, None), Err(LookupError::SystemNotFound));
+        assert_eq!(
+            fs::metadata(directory.path().join("tokens.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            engine.lookup(Some("missing"), None, None, None),
+            Err(LookupError::SystemNotFound)
+        );
     }
 
     #[tokio::test]
     async fn webhook_grows_every_hierarchy_and_persists_before_acknowledgement() {
         let (directory, engine) = fixture();
-        engine.upsert("community", "jcb", "powers", &heartbeat(json!(12), 1)).await.unwrap();
-        let expected = json!({"id":12,"name":"mirror","url":"https://example.invalid/code","status":1});
-        let target = decode(engine.lookup(Some("community"), Some("jcb"), Some("powers"), None).unwrap());
+        engine
+            .upsert("community", "jcb", "powers", &heartbeat(json!(12), 1))
+            .await
+            .unwrap();
+        let expected =
+            json!({"id":12,"name":"mirror","url":"https://example.invalid/code","status":1});
+        let target = decode(
+            engine
+                .lookup(Some("community"), Some("jcb"), Some("powers"), None)
+                .unwrap(),
+        );
         assert_eq!(target, json!({"target":"powers","network":[expected]}));
-        let project = decode(engine.lookup(Some("community"), Some("jcb"), None, None).unwrap());
+        let project = decode(
+            engine
+                .lookup(Some("community"), Some("jcb"), None, None)
+                .unwrap(),
+        );
         assert_eq!(project["targets"][0], target);
         let system = decode(engine.lookup(Some("community"), None, None, None).unwrap());
         assert_eq!(system["projects"][0], project);
         let all = decode(engine.lookup(None, None, None, None).unwrap());
         assert_eq!(all["systems"][0], system);
-        let disk: Value = serde_json::from_slice(&fs::read(directory.path().join("cache.json")).unwrap()).unwrap();
+        let disk: Value =
+            serde_json::from_slice(&fs::read(directory.path().join("cache.json")).unwrap())
+                .unwrap();
         assert_eq!(disk, all);
 
-        let reopened = Engine::open(directory.path().join("cache.json"), directory.path().join("tokens.json"), 1024 * 1024).unwrap();
+        let reopened = Engine::open(
+            directory.path().join("cache.json"),
+            directory.path().join("tokens.json"),
+            1024 * 1024,
+        )
+        .unwrap();
         assert_eq!(reopened.snapshot(), all);
     }
 
     #[tokio::test]
     async fn cached_reads_share_bytes_and_unknown_statuses_do_not_expand_cache() {
         let (_directory, engine) = fixture();
-        engine.upsert("s", "p", "t", &heartbeat(json!(1), 1)).await.unwrap();
-        let a = engine.lookup(Some("s"), Some("p"), Some("t"), None).unwrap();
-        let b = engine.lookup(Some("s"), Some("p"), Some("t"), None).unwrap();
+        engine
+            .upsert("s", "p", "t", &heartbeat(json!(1), 1))
+            .await
+            .unwrap();
+        let a = engine
+            .lookup(Some("s"), Some("p"), Some("t"), None)
+            .unwrap();
+        let b = engine
+            .lookup(Some("s"), Some("p"), Some("t"), None)
+            .unwrap();
         assert_eq!(a.as_ptr(), b.as_ptr());
-        let empty = engine.lookup(Some("s"), Some("p"), Some("t"), Some(5)).unwrap();
+        let empty = engine
+            .lookup(Some("s"), Some("p"), Some("t"), Some(5))
+            .unwrap();
         assert_eq!(decode(empty.clone()), json!({"target":"t","network":[]}));
         for status in -50..0 {
-            assert_eq!(empty.as_ptr(), engine.lookup(Some("s"), Some("p"), Some("t"), Some(status)).unwrap().as_ptr());
+            assert_eq!(
+                empty.as_ptr(),
+                engine
+                    .lookup(Some("s"), Some("p"), Some("t"), Some(status))
+                    .unwrap()
+                    .as_ptr()
+            );
         }
     }
 
@@ -864,39 +1024,104 @@ mod tests {
     async fn upsert_replaces_existing_id_and_preserves_network_insertion_order() {
         let (_directory, engine) = fixture();
         for id in [json!(1), json!(2), json!("1")] {
-            engine.upsert("s", "p", "t", &heartbeat(id, 1)).await.unwrap();
+            engine
+                .upsert("s", "p", "t", &heartbeat(id, 1))
+                .await
+                .unwrap();
         }
-        engine.upsert("s", "p", "t", &heartbeat(json!(1), 0)).await.unwrap();
-        let target = decode(engine.lookup(Some("s"), Some("p"), Some("t"), None).unwrap());
+        engine
+            .upsert("s", "p", "t", &heartbeat(json!(1), 0))
+            .await
+            .unwrap();
+        let target = decode(
+            engine
+                .lookup(Some("s"), Some("p"), Some("t"), None)
+                .unwrap(),
+        );
         assert_eq!(target["network"].as_array().unwrap().len(), 3);
         assert_eq!(target["network"][0]["id"], 1);
         assert_eq!(target["network"][0]["status"], 0);
         assert_eq!(target["network"][1]["id"], 2);
         assert_eq!(target["network"][2]["id"], "1");
-        let online = decode(engine.lookup(Some("s"), Some("p"), Some("t"), Some(1)).unwrap());
+        let online = decode(
+            engine
+                .lookup(Some("s"), Some("p"), Some("t"), Some(1))
+                .unwrap(),
+        );
         assert_eq!(online["network"].as_array().unwrap().len(), 2);
-        let offline = decode(engine.lookup(Some("s"), Some("p"), Some("t"), Some(0)).unwrap());
+        let offline = decode(
+            engine
+                .lookup(Some("s"), Some("p"), Some("t"), Some(0))
+                .unwrap(),
+        );
         assert_eq!(offline["network"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn legacy_arbitrary_integer_statuses_remain_filterable() {
         let (_directory, engine) = fixture();
-        engine.upsert("s", "p", "t", &heartbeat(json!(1), 2)).await.unwrap();
-        assert_eq!(decode(engine.lookup(Some("s"), Some("p"), Some("t"), Some(2)).unwrap())["network"][0]["status"], 2);
-        assert!(decode(engine.lookup(Some("s"), Some("p"), Some("t"), Some(0)).unwrap())["network"].as_array().unwrap().is_empty());
+        engine
+            .upsert("s", "p", "t", &heartbeat(json!(1), 2))
+            .await
+            .unwrap();
+        assert_eq!(
+            decode(
+                engine
+                    .lookup(Some("s"), Some("p"), Some("t"), Some(2))
+                    .unwrap()
+            )["network"][0]["status"],
+            2
+        );
+        assert!(decode(
+            engine
+                .lookup(Some("s"), Some("p"), Some("t"), Some(0))
+                .unwrap()
+        )["network"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
     async fn removal_prunes_empty_parents_and_can_be_recreated_by_webhook() {
         let (_directory, engine) = fixture();
-        engine.upsert("s", "p", "t", &heartbeat(json!(1), 1)).await.unwrap();
-        engine.upsert("s", "p", "t", &heartbeat(json!(2), 0)).await.unwrap();
-        assert_eq!(engine.remove("s", Some("p"), Some("t"), Some(&json!(1))).await.unwrap(), 1);
-        assert_eq!(engine.remove("s", Some("p"), Some("t"), Some(&json!(999))).await.unwrap(), 0);
-        assert_eq!(engine.remove("s", Some("p"), Some("t"), None).await.unwrap(), 1);
-        assert_eq!(engine.lookup(Some("s"), None, None, None), Err(LookupError::SystemNotFound));
-        engine.upsert("s", "p", "t", &heartbeat(json!(1), 1)).await.unwrap();
+        engine
+            .upsert("s", "p", "t", &heartbeat(json!(1), 1))
+            .await
+            .unwrap();
+        engine
+            .upsert("s", "p", "t", &heartbeat(json!(2), 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            engine
+                .remove("s", Some("p"), Some("t"), Some(&json!(1)))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine
+                .remove("s", Some("p"), Some("t"), Some(&json!(999)))
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine
+                .remove("s", Some("p"), Some("t"), None)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.lookup(Some("s"), None, None, None),
+            Err(LookupError::SystemNotFound)
+        );
+        engine
+            .upsert("s", "p", "t", &heartbeat(json!(1), 1))
+            .await
+            .unwrap();
         assert!(engine.lookup(Some("s"), Some("p"), Some("t"), None).is_ok());
         assert_eq!(engine.remove("s", None, None, None).await.unwrap(), 1);
         assert_eq!(engine.snapshot(), json!({"systems":[]}));
@@ -905,11 +1130,22 @@ mod tests {
     #[tokio::test]
     async fn subtree_removal_does_not_touch_other_projects_or_systems() {
         let (_directory, engine) = fixture();
-        for (s, p, t) in [("s", "p", "a"), ("s", "p", "b"), ("s", "q", "a"), ("other", "p", "a")] {
-            engine.upsert(s, p, t, &heartbeat(json!(1), 1)).await.unwrap();
+        for (s, p, t) in [
+            ("s", "p", "a"),
+            ("s", "p", "b"),
+            ("s", "q", "a"),
+            ("other", "p", "a"),
+        ] {
+            engine
+                .upsert(s, p, t, &heartbeat(json!(1), 1))
+                .await
+                .unwrap();
         }
         assert_eq!(engine.remove("s", Some("p"), None, None).await.unwrap(), 2);
-        assert_eq!(engine.lookup(Some("s"), Some("p"), None, None), Err(LookupError::ProjectNotFound));
+        assert_eq!(
+            engine.lookup(Some("s"), Some("p"), None, None),
+            Err(LookupError::ProjectNotFound)
+        );
         assert!(engine.lookup(Some("s"), Some("q"), None, None).is_ok());
         assert!(engine.lookup(Some("other"), Some("p"), None, None).is_ok());
     }
@@ -917,8 +1153,14 @@ mod tests {
     #[tokio::test]
     async fn token_matching_is_exact_scoped_and_listing_never_exposes_secrets() {
         let (directory, engine) = fixture();
-        engine.token_add("s", "existing-secret-token").await.unwrap();
-        engine.token_add("s", "existing-secret-token").await.unwrap();
+        engine
+            .token_add("s", "existing-secret-token")
+            .await
+            .unwrap();
+        engine
+            .token_add("s", "existing-secret-token")
+            .await
+            .unwrap();
         engine.token_add("s", "Bearer legacy-value").await.unwrap();
         assert!(engine.authorized("s", "existing-secret-token"));
         assert!(engine.authorized("s", "Bearer legacy-value"));
@@ -932,7 +1174,12 @@ mod tests {
         assert_eq!(engine.token_revoke("s", fingerprint).await.unwrap(), 1);
         assert!(!engine.authorized("s", "existing-secret-token"));
         assert!(engine.authorized("s", "Bearer legacy-value"));
-        let reopened = Engine::open(directory.path().join("cache.json"), directory.path().join("tokens.json"), 1024 * 1024).unwrap();
+        let reopened = Engine::open(
+            directory.path().join("cache.json"),
+            directory.path().join("tokens.json"),
+            1024 * 1024,
+        )
+        .unwrap();
         assert!(!reopened.authorized("s", "existing-secret-token"));
         assert!(reopened.authorized("s", "Bearer legacy-value"));
     }
@@ -941,7 +1188,9 @@ mod tests {
     async fn malformed_webhooks_cannot_mutate_state() {
         let (_directory, engine) = fixture();
         for payload in [
-            json!([1]), json!({}), json!({"heartbeat":null}),
+            json!([1]),
+            json!({}),
+            json!({"heartbeat":null}),
             json!({"heartbeat":{"monitorID":[],"status":1}}),
             json!({"heartbeat":{"monitorID":1,"status":"1"}}),
             json!({"heartbeat":{"monitorID":null,"status":1}}),
@@ -950,15 +1199,30 @@ mod tests {
             assert!(engine.upsert("s", "p", "t", &payload).await.is_err());
             assert_eq!(engine.snapshot(), json!({"systems":[]}));
         }
-        assert!(engine.upsert("s/p", "p", "t", &heartbeat(json!(1), 1)).await.is_err());
+        assert!(engine
+            .upsert("s/p", "p", "t", &heartbeat(json!(1), 1))
+            .await
+            .is_err());
         assert!(engine.remove("s", None, Some("t"), None).await.is_err());
     }
 
     #[tokio::test]
     async fn missing_monitor_fields_keep_legacy_defaults() {
         let (_directory, engine) = fixture();
-        engine.upsert("s", "p", "t", &json!({"heartbeat":{"monitorID":1,"status":1}})).await.unwrap();
-        let target = decode(engine.lookup(Some("s"), Some("p"), Some("t"), None).unwrap());
+        engine
+            .upsert(
+                "s",
+                "p",
+                "t",
+                &json!({"heartbeat":{"monitorID":1,"status":1}}),
+            )
+            .await
+            .unwrap();
+        let target = decode(
+            engine
+                .lookup(Some("s"), Some("p"), Some("t"), None)
+                .unwrap(),
+        );
         assert_eq!(target["network"][0]["name"], "N/A");
         assert_eq!(target["network"][0]["url"], "N/A");
     }
@@ -966,29 +1230,53 @@ mod tests {
     #[tokio::test]
     async fn failed_persistence_keeps_previous_public_snapshot() {
         let (directory, engine) = fixture();
-        engine.upsert("s", "p", "t", &heartbeat(json!(1), 1)).await.unwrap();
+        engine
+            .upsert("s", "p", "t", &heartbeat(json!(1), 1))
+            .await
+            .unwrap();
         let previous = engine.snapshot();
         let cache = directory.path().join("cache.json");
         let backup = directory.path().join("original.json");
         fs::rename(&cache, &backup).unwrap();
         fs::create_dir(&cache).unwrap();
-        assert!(engine.upsert("s", "p", "t", &heartbeat(json!(1), 0)).await.is_err());
+        assert!(engine
+            .upsert("s", "p", "t", &heartbeat(json!(1), 0))
+            .await
+            .is_err());
         assert_eq!(engine.snapshot(), previous);
-        assert_eq!(fs::read_dir(directory.path()).unwrap().filter_map(|item| item.ok()).filter(|item| item.file_name().to_string_lossy().ends_with(".tmp")).count(), 0);
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(|item| item.ok())
+                .filter(|item| item.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0
+        );
         fs::remove_dir(&cache).unwrap();
         fs::rename(&backup, &cache).unwrap();
-        assert_eq!(read_catalog(&cache, 1024 * 1024).unwrap(), engine.inner.snapshot.load().catalog);
+        assert_eq!(
+            read_catalog(&cache, 1024 * 1024).unwrap(),
+            engine.inner.snapshot.load().catalog
+        );
     }
 
     #[tokio::test]
     async fn malformed_external_reload_keeps_last_valid_state_and_tokens() {
         let (directory, engine) = fixture();
         engine.token_add("s", "safe-existing-token").await.unwrap();
-        fs::write(directory.path().join("tokens.json"), b"{\"s\":\"safe-existing-token\"}").unwrap();
+        fs::write(
+            directory.path().join("tokens.json"),
+            b"{\"s\":\"safe-existing-token\"}",
+        )
+        .unwrap();
         let error = engine.reload().await.unwrap_err().to_string();
         assert!(!error.contains("safe-existing-token"));
         assert!(engine.authorized("s", "safe-existing-token"));
-        fs::write(directory.path().join("tokens.json"), b"{\"s\":[\"replacement\"]}").unwrap();
+        fs::write(
+            directory.path().join("tokens.json"),
+            b"{\"s\":[\"replacement\"]}",
+        )
+        .unwrap();
         fs::write(directory.path().join("cache.json"), b"[]").unwrap();
         assert!(engine.reload().await.is_err());
         assert!(engine.authorized("s", "safe-existing-token"));
@@ -1017,13 +1305,21 @@ mod tests {
         let mut tasks = Vec::new();
         for id in 0..24 {
             let engine = engine.clone();
-            tasks.push(tokio::spawn(async move { engine.upsert("s", "p", "t", &heartbeat(json!(id), id % 2)).await }));
+            tasks.push(tokio::spawn(async move {
+                engine
+                    .upsert("s", "p", "t", &heartbeat(json!(id), id % 2))
+                    .await
+            }));
         }
         for task in tasks {
             task.await.unwrap().unwrap();
         }
         engine.flush().await.unwrap();
-        let target = decode(engine.lookup(Some("s"), Some("p"), Some("t"), None).unwrap());
+        let target = decode(
+            engine
+                .lookup(Some("s"), Some("p"), Some("t"), None)
+                .unwrap(),
+        );
         assert_eq!(target["network"].as_array().unwrap().len(), 24);
     }
 
@@ -1034,12 +1330,24 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let writer = engine.clone();
         let request = tokio::spawn(async move {
-            writer.change(FileKind::Catalog, move |catalog, _| {
-                entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                catalog.upsert("s".into(), "p".into(), "t".into(), Network { id:json!(1),name:"n".into(),url:"u".into(),status:1 });
-                Ok(())
-            }).await
+            writer
+                .change(FileKind::Catalog, move |catalog, _| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    catalog.upsert(
+                        "s".into(),
+                        "p".into(),
+                        "t".into(),
+                        Network {
+                            id: json!(1),
+                            name: "n".into(),
+                            url: "u".into(),
+                            status: 1,
+                        },
+                    );
+                    Ok(())
+                })
+                .await
         });
         entered_rx.await.unwrap();
         request.abort();
@@ -1051,25 +1359,59 @@ mod tests {
     #[tokio::test]
     async fn state_size_limit_rejects_growth_without_touching_disk() {
         let directory = TempDir::new().unwrap();
-        let engine = Engine::open(directory.path().join("cache.json"), directory.path().join("tokens.json"), 64).unwrap();
-        assert!(engine.upsert("s", "p", "t", &heartbeat(json!(1), 1)).await.is_err());
+        let engine = Engine::open(
+            directory.path().join("cache.json"),
+            directory.path().join("tokens.json"),
+            64,
+        )
+        .unwrap();
+        assert!(engine
+            .upsert("s", "p", "t", &heartbeat(json!(1), 1))
+            .await
+            .is_err());
         assert_eq!(engine.snapshot(), json!({"systems":[]}));
-        assert_eq!(read_catalog(&directory.path().join("cache.json"), 64).unwrap(), Catalog::default());
+        assert_eq!(
+            read_catalog(&directory.path().join("cache.json"), 64).unwrap(),
+            Catalog::default()
+        );
     }
 
     #[test]
     fn symlinked_state_and_shared_cache_token_paths_are_rejected() {
         let directory = TempDir::new().unwrap();
         fs::write(directory.path().join("real.json"), b"{\"systems\":[]}").unwrap();
-        symlink(directory.path().join("real.json"), directory.path().join("cache.json")).unwrap();
-        assert!(Engine::open(directory.path().join("cache.json"), directory.path().join("tokens.json"), 1024).is_err());
-        assert!(Engine::open(directory.path().join("same.json"), directory.path().join("same.json"), 1024).is_err());
+        symlink(
+            directory.path().join("real.json"),
+            directory.path().join("cache.json"),
+        )
+        .unwrap();
+        assert!(Engine::open(
+            directory.path().join("cache.json"),
+            directory.path().join("tokens.json"),
+            1024
+        )
+        .is_err());
+        assert!(Engine::open(
+            directory.path().join("same.json"),
+            directory.path().join("same.json"),
+            1024
+        )
+        .is_err());
     }
 
     #[test]
     fn malformed_token_schema_never_becomes_substring_authorization() {
         let directory = TempDir::new().unwrap();
-        fs::write(directory.path().join("tokens.json"), b"{\"s\":\"long-secret\"}").unwrap();
-        assert!(Engine::open(directory.path().join("cache.json"), directory.path().join("tokens.json"), 1024).is_err());
+        fs::write(
+            directory.path().join("tokens.json"),
+            b"{\"s\":\"long-secret\"}",
+        )
+        .unwrap();
+        assert!(Engine::open(
+            directory.path().join("cache.json"),
+            directory.path().join("tokens.json"),
+            1024
+        )
+        .is_err());
     }
 }

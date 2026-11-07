@@ -22,7 +22,12 @@ pub fn openapi() -> Value {
         ("getSystem", "List projects in a system", "System", 1),
         ("getProject", "List targets in a project", "Project", 2),
         ("getTarget", "List network nodes in a target", "Target", 3),
-        ("getTargetByStatus", "Filter network nodes by status", "Target", 4),
+        (
+            "getTargetByStatus",
+            "Filter network nodes by status",
+            "Target",
+            4,
+        ),
     ];
     let names = ["system", "project", "target", "status"];
     let mut paths = Map::new();
@@ -51,19 +56,25 @@ pub fn openapi() -> Value {
             }));
         }
         if count == 4 {
-            responses.insert("400".into(), json!({
-                "description": "The status is not an integer.",
-                "content": {"application/json": {
-                    "schema": {"$ref": "#/components/schemas/Error"},
-                    "example": {"error": "Invalid status provided"}
-                }}
-            }));
+            responses.insert(
+                "400".into(),
+                json!({
+                    "description": "The status is not an integer.",
+                    "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/Error"},
+                        "example": {"error": "Invalid status provided"}
+                    }}
+                }),
+            );
         }
         responses.insert("429".into(), json!({
             "description": "Deployment-specific sustained rate or burst allowance exceeded. Back off before retrying.",
             "headers": {"Retry-After": {"description": "Delay in seconds before retrying.", "schema": {"type": "string"}}}
         }));
-        responses.insert("503".into(), json!({"description": "Service capacity temporarily unavailable. Retry with backoff."}));
+        responses.insert(
+            "503".into(),
+            json!({"description": "Service capacity temporarily unavailable. Retry with backoff."}),
+        );
         paths.insert((*path).into(), json!({"get": {
             "operationId": operation,
             "summary": summary,
@@ -154,7 +165,10 @@ mod tests {
         let status = &document["components"]["parameters"]["status"]["schema"];
         assert_eq!(status["type"], "integer");
         assert!(status.get("enum").is_none());
-        assert_eq!(document["components"]["schemas"]["Target"]["example"]["network"][0]["status"], 1);
+        assert_eq!(
+            document["components"]["schemas"]["Target"]["example"]["network"][0]["status"],
+            1
+        );
         assert!(html().contains("/openapi.json"));
         assert!(!html().contains("api.joomlacomponentbuilder.com"));
     }
