@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end checks against a temporary local instance. Never contacts production.
-set -euo pipefail
+set -Eeuo pipefail
 
 binary=$(realpath -- "${1:-target/debug/jcb-api}")
 [[ -x "$binary" ]] || { printf 'Executable not found: %s\n' "$binary" >&2; exit 1; }
@@ -20,6 +20,16 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+on_error() {
+    local status=$1 line=$2
+    trap - ERR
+    printf 'Unexpected smoke-test failure at line %s (exit %s).\n' "$line" "$status" >&2
+    if [[ -f "$workspace/service.log" ]]; then
+        tail -n 100 "$workspace/service.log" >&2
+    fi
+    exit "$status"
+}
+trap 'on_error "$?" "$LINENO"' ERR
 
 fail() { printf 'Smoke test failed: %s\n' "$*" >&2; cat "$workspace/service.log" >&2 2>/dev/null || true; exit 1; }
 api() { curl --silent --show-error --max-time 5 --unix-socket "$workspace/api.sock" "$@"; }
@@ -32,7 +42,9 @@ expect_code() {
     [[ "$actual" == "$expected" ]] || fail "expected HTTP $expected, received $actual for $*"
 }
 start_service() {
-    cli serve >> "$workspace/service.log" 2>&1 &
+    # Background the executable itself: a background shell function creates a
+    # wrapper PID, and signalling that wrapper would leave the service running.
+    "$binary" --env-file "$workspace/.env" serve >> "$workspace/service.log" 2>&1 &
     server_pid=$!
     local ready=false
     for ((attempt = 0; attempt < 100; attempt++)); do

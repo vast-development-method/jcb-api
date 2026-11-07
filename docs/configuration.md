@@ -34,13 +34,15 @@ that reconfiguration can regenerate Nginx/systemd consistently.
 | `LOG_NETWORK_REQUESTS` | `true`, detailed successful public-request events |
 | `LOG_QUEUE_CAPACITY` | `8192`, bounded asynchronous logging queue |
 | `MAX_CONTENT_LENGTH` | `1048576`, maximum monitoring request size in bytes |
-| `MAX_STATE_BYTES` | Calculated from allocation; maximum durable state size |
+| `MAX_STATE_BYTES` | Default: service memory allowance divided by 32; 8 MiB on a 512 MiB installation |
 | `POLL_INTERVAL_SECONDS` | `5`, external state/token file reload check interval |
 
 Paths must be absolute and contain only letters, digits, `_`, `.`, `-`, and `/`.
 The installer rejects spaces, traversal, symlinks where a regular configuration
 file is required, and nested/overlapping release, state and configuration
-locations. The application can use filesystem paths through runtime options;
+locations. Release/configuration ancestry must also be root-owned, non-symlink,
+and not group/world writable; a writable home directory is not suitable for
+trusted code or updater configuration. The application can use filesystem paths through runtime options;
 these bootstrap restrictions make generated shell/systemd/Nginx configuration
 unambiguous.
 
@@ -85,7 +87,9 @@ Keep the old logs for history; use journald retention settings for new activity.
 
 For a 512 MiB allocation, the installer sets the service memory maximum to
 256 MiB and a pressure threshold below that. The remainder is available to the
-kernel, Nginx and other necessary system services. Increase the allocation and
+kernel, Nginx and other necessary system services. The default maximum state file
+size is 8 MiB at this allocation, leaving room for prepared responses and other
+working memory. Increase the allocation and
 reconfigure when moving to a larger server; do not set it to the host's entire
 physical memory when other workloads need a share.
 

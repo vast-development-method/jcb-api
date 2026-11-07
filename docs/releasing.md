@@ -15,7 +15,7 @@ and install binaries; they never compile source code.
    Keep private keys outside the repository, even temporarily.
 
 ```bash
-cargo build --release
+cargo build --locked --release
 mkdir -p "$HOME/jcb-api-release-keys"
 chmod 700 "$HOME/jcb-api-release-keys"
 ./target/release/jcb-api release-keygen \
@@ -70,7 +70,8 @@ executables, `SHA256SUMS`, and `SHA256SUMS.sig`. The signature is the raw 64-byt
 Ed25519 signature over the exact manifest bytes. Signatures authenticate the
 manifest; SHA-256 entries bind each asset's name to its bytes.
 
-Only stable releases are eligible for automatic installation. A published release
+The workflow can also publish SemVer prerelease tags, marked as prereleases on
+GitHub. Only stable releases are eligible for automatic installation. A published release
 is not overwritten. Use a new version for corrected published artifacts. The
 workflow fails closed when signing material is absent or does not match.
 
@@ -93,7 +94,7 @@ that the release path works without exposing the production signing key.
 The native CLI can verify a previously downloaded release set:
 
 ```bash
-jcb-api release-verify \
+sudo /opt/jcb-api/current/jcb-api release-verify \
   --manifest SHA256SUMS \
   --signature SHA256SUMS.sig \
   --public-key /etc/jcb-api/release-public.pem \
@@ -127,9 +128,12 @@ actual published version. That does not bypass the no-downgrade rule. The saved
 systemd updater unit contains explicit path/socket/repository arguments for
 non-default installations.
 
-A failed verified release directory is left for investigation. Inspect its logs
-and contents before removing that directory to retry the same version. Do not
-remove the directory referenced by `current` or the previous working release.
+A failed verified release directory is retained for investigation. A later timer
+run can retry it automatically: the updater freshly downloads and verifies the
+release, then reuses the existing binary only if its protected file matches the
+verified digest exactly. Different contents under the same version are refused
+for inspection. Do not remove the directory referenced by `current` or the
+previous working release.
 
 ### Manual rollback
 
@@ -138,6 +142,8 @@ choose the exact prior version. For example, the following prompts avoid silentl
 selecting an arbitrary historical binary:
 
 ```bash
+(
+set -eu
 sudo systemctl stop jcb-api-update.timer
 ls -1 /opt/jcb-api/releases
 read -r -p 'Retained release tag to restore: ' rollback_tag
@@ -148,6 +154,7 @@ sudo ln -s "releases/$rollback_tag" /opt/jcb-api/.current-rollback
 sudo mv -Tf /opt/jcb-api/.current-rollback /opt/jcb-api/current
 sudo systemctl start jcb-api.service
 sudo curl --fail --unix-socket /run/jcb-api/api.sock http://localhost/healthz
+)
 ```
 
 Check state-format compatibility before running an older binary. This operation
