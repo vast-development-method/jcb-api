@@ -47,30 +47,10 @@ enum Commands {
     },
     /// Check and install a verified stable release, independently of serving.
     Update(updater::UpdateArgs),
-    /// Generate an offline Ed25519 release signing key pair.
-    ReleaseKeygen {
-        #[arg(long)]
-        private_key: PathBuf,
-        #[arg(long)]
-        public_key: PathBuf,
-    },
-    /// Sign a SHA256SUMS release manifest with an offline key.
-    ReleaseSign {
-        #[arg(long)]
-        manifest: PathBuf,
-        #[arg(long)]
-        private_key: PathBuf,
-        #[arg(long)]
-        signature: PathBuf,
-    },
-    /// Verify a release signature and an asset's exact checksum.
+    /// Verify an asset's exact checksum against its SHA256SUMS release manifest.
     ReleaseVerify {
         #[arg(long)]
         manifest: PathBuf,
-        #[arg(long)]
-        signature: PathBuf,
-        #[arg(long)]
-        public_key: PathBuf,
         #[arg(long)]
         asset: PathBuf,
     },
@@ -134,27 +114,9 @@ fn run() -> Result<()> {
             println!("{}", updater::run(args)?);
             return Ok(());
         }
-        Commands::ReleaseKeygen {
-            private_key,
-            public_key,
-        } => {
-            updater::keygen(&private_key, &public_key)?;
-            println!("Generated release keys. Keep the private key offline.");
-            return Ok(());
-        }
-        Commands::ReleaseSign {
-            manifest,
-            private_key,
-            signature,
-        } => return updater::sign(&manifest, &private_key, &signature),
-        Commands::ReleaseVerify {
-            manifest,
-            signature,
-            public_key,
-            asset,
-        } => {
-            updater::verify(&manifest, &signature, &public_key, &asset)?;
-            println!("Release signature and checksum verified");
+        Commands::ReleaseVerify { manifest, asset } => {
+            updater::verify(&manifest, &asset)?;
+            println!("Release checksum verified");
             return Ok(());
         }
         Commands::Openapi => {

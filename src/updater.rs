@@ -1,16 +1,11 @@
-//! Signed release distribution. The serving process never calls this module's updater.
+//! Release distribution. The serving process never calls this module's updater.
 //!
-//! SHA256SUMS is signed with Ed25519. The verification key is installed separately
-//! and must not be replaced by a release download. Checksums alone are not a trust root.
+//! The binary and SHA256SUMS are downloaded from the configured GitHub release
+//! over HTTPS. The checksum is verified before the candidate binary is executed.
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
-use ed25519_dalek::{
-    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey},
-    Signature, Signer, SigningKey, VerifyingKey,
-};
 use fs2::FileExt;
-use rand_core::OsRng;
 use reqwest::{blocking::Client, redirect::Policy, Url};
 use semver::Version;
 use serde::Deserialize;
@@ -19,7 +14,7 @@ use std::{
     collections::HashMap,
     fmt,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::Read,
     os::unix::fs::{symlink, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -37,8 +32,6 @@ pub struct UpdateArgs {
     pub repository: String,
     #[arg(long, default_value = "/opt/jcb-api")]
     pub install_dir: PathBuf,
-    #[arg(long, default_value = "/etc/jcb-api/release-public.pem")]
-    pub public_key: PathBuf,
     #[arg(long, default_value = "/run/jcb-api/api.sock")]
     pub socket: PathBuf,
     #[arg(long, default_value = "jcb-api.service")]
@@ -98,51 +91,9 @@ struct Asset {
     size: u64,
 }
 
-/// Generate a signing key offline. Neither file is overwritten.
-pub fn keygen(private_key: &Path, public_key: &Path) -> Result<()> {
-    if private_key == public_key || private_key.exists() || public_key.exists() {
-        bail!("Key paths must be distinct and neither file may already exist");
-    }
-    let signing = SigningKey::generate(&mut OsRng);
-    // OpenSSL's Ed25519 private-key loader expects PKCS#8 v1. Encoding a
-    // SigningKey directly includes the optional public key and produces the
-    // RFC 5958 v2 form, which OpenSSL 3.0 cannot load. Omit that optional field;
-    // both RustCrypto and OpenSSL derive the public key from the same seed.
-    let key_bytes = ed25519_dalek::pkcs8::KeypairBytes {
-        secret_key: signing.to_bytes(),
-        public_key: None,
-    };
-    let secret = key_bytes.to_pkcs8_pem(Default::default())?;
-    let public = signing
-        .verifying_key()
-        .to_public_key_pem(Default::default())?;
-    write_new(private_key, secret.as_bytes(), 0o600)?;
-    write_new(public_key, public.as_bytes(), 0o644)?;
-    Ok(())
-}
-
-/// Sign the exact manifest bytes; signature is a raw 64-byte Ed25519 signature.
-pub fn sign(manifest: &Path, private_key: &Path, signature: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(private_key)?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
-        bail!("The private signing key must be a regular file with owner-only permissions (0600)");
-    }
+/// Verify the asset's exact checksum against its release manifest.
+pub fn verify(manifest: &Path, asset: &Path) -> Result<()> {
     let input = read_bounded(manifest, MAX_MANIFEST)?;
-    parse_manifest(&input)?;
-    let secret = read_bounded(private_key, 16 * 1024)?;
-    let key = SigningKey::from_pkcs8_pem(std::str::from_utf8(&secret)?)?;
-    write_new(signature, &key.sign(&input).to_bytes(), 0o644)
-}
-
-/// Verify both provenance and the exact asset content before execution.
-pub fn verify(manifest: &Path, signature: &Path, public_key: &Path, asset: &Path) -> Result<()> {
-    let input = read_bounded(manifest, MAX_MANIFEST)?;
-    let signature = read_bounded(signature, 64)?;
-    let key_pem = read_bounded(public_key, 16 * 1024)?;
-    let key = VerifyingKey::from_public_key_pem(std::str::from_utf8(&key_pem)?)?;
-    let signature = Signature::from_slice(&signature).context("Invalid Ed25519 signature size")?;
-    key.verify_strict(&input, &signature)
-        .context("Release signature verification failed")?;
     let entries = parse_manifest(&input)?;
     let name = asset
         .file_name()
@@ -150,7 +101,7 @@ pub fn verify(manifest: &Path, signature: &Path, public_key: &Path, asset: &Path
         .context("Asset requires a UTF-8 filename")?;
     let expected = entries
         .get(name)
-        .context("Asset is absent from the signed manifest")?;
+        .context("Asset is absent from the release manifest")?;
     let actual = digest_file(asset)?;
     if actual != *expected {
         bail!("Release asset checksum mismatch for {name}");
@@ -183,9 +134,8 @@ pub fn run(args: UpdateArgs) -> Result<UpdateOutcome> {
         });
     }
 
-    // Runtime account must not be able to replace the trust root or installation.
+    // Runtime account must not be able to replace the installation.
     ensure_root_protected(&args.install_dir, true)?;
-    ensure_root_protected(&args.public_key, false)?;
     let lock_path = args.install_dir.join(".update.lock");
     if fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
         bail!("Update lock must not be a symlink");
@@ -216,7 +166,6 @@ pub fn run(args: UpdateArgs) -> Result<UpdateOutcome> {
     let asset_name = format!("jcb-api-{target}");
     for (name, limit) in [
         ("SHA256SUMS", MAX_MANIFEST),
-        ("SHA256SUMS.sig", 64),
         (asset_name.as_str(), MAX_BINARY),
     ] {
         let asset = unique_asset(&release, name)?;
@@ -231,28 +180,23 @@ pub fn run(args: UpdateArgs) -> Result<UpdateOutcome> {
         )?;
     }
     let binary = stage.path.join(&asset_name);
-    verify(
-        &stage.path.join("SHA256SUMS"),
-        &stage.path.join("SHA256SUMS.sig"),
-        &args.public_key,
-        &binary,
-    )?;
+    verify(&stage.path.join("SHA256SUMS"), &binary)?;
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))?;
     if binary_version(&binary)? != candidate {
-        bail!("Signed binary version does not match the GitHub release tag");
+        bail!("Binary version does not match the GitHub release tag");
     }
     File::open(&binary)?.sync_all()?;
     fs::rename(&binary, stage.path.join("jcb-api"))?;
     sync_directory(&stage.path)?;
     let release_dir = releases.join(format!("v{candidate}"));
     if release_dir.exists() {
-        // A transient health failure may have left this signed version staged.
+        // A transient health failure may have left this version staged.
         // Reuse only an exact, protected match to the freshly verified download.
         ensure_root_protected(&release_dir, true)?;
         let existing = release_dir.join("jcb-api");
         ensure_root_protected(&existing, false)?;
         if digest_file(&existing)? != digest_file(&stage.path.join("jcb-api"))? {
-            bail!("Existing release {} differs from the signed download; inspect it before proceeding", release_dir.display());
+            bail!("Existing release {} differs from the verified download; inspect it before proceeding", release_dir.display());
         }
     } else {
         fs::rename(&stage.path, &release_dir)?;
@@ -595,17 +539,6 @@ fn limited_reader(reader: impl Read, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(mode)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
 fn ensure_root_protected(path: &Path, directory: bool) -> Result<()> {
     if !path.is_absolute()
         || path
@@ -751,27 +684,12 @@ impl Drop for Stage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use tempfile::tempdir;
 
     #[test]
-    fn signatures_reject_tampered_payload_manifest_and_wrong_key() -> Result<()> {
+    fn checksum_verification_accepts_matching_asset_and_rejects_changes() -> Result<()> {
         let dir = tempdir()?;
-        let private = dir.path().join("private.pem");
-        let public = dir.path().join("public.pem");
-        keygen(&private, &public)?;
-        assert_eq!(fs::metadata(&private)?.permissions().mode() & 0o777, 0o600);
-        let private_pem = fs::read_to_string(&private)?;
-        let encoded = ed25519_dalek::pkcs8::KeypairBytes::from_pkcs8_pem(&private_pem)?;
-        assert!(
-            encoded.public_key.is_none(),
-            "Private keys must use PKCS#8 v1"
-        );
-        let decoded = SigningKey::from_pkcs8_pem(&private_pem)?;
-        let public_pem = fs::read_to_string(&public)?;
-        assert_eq!(
-            decoded.verifying_key(),
-            VerifyingKey::from_public_key_pem(&public_pem)?
-        );
         let asset = dir.path().join("jcb-api-x86_64-unknown-linux-gnu");
         fs::write(&asset, b"test release content")?;
         let manifest = dir.path().join("SHA256SUMS");
@@ -781,27 +699,23 @@ mod tests {
             asset.file_name().unwrap().to_str().unwrap()
         );
         fs::write(&manifest, &original)?;
-        let signature = dir.path().join("SHA256SUMS.sig");
-        sign(&manifest, &private, &signature)?;
-        verify(&manifest, &signature, &public, &asset)?;
+        verify(&manifest, &asset)?;
         fs::write(&asset, b"modified")?;
-        assert!(verify(&manifest, &signature, &public, &asset).is_err());
+        assert!(verify(&manifest, &asset).is_err());
         fs::write(&asset, b"test release content")?;
-        fs::write(&manifest, format!("{original}\n"))?;
-        assert!(verify(&manifest, &signature, &public, &asset).is_err());
+        fs::write(
+            &manifest,
+            format!("{}  jcb-api-x86_64-unknown-linux-gnu\n", "0".repeat(64)),
+        )?;
+        assert!(verify(&manifest, &asset).is_err());
         fs::write(&manifest, &original)?;
-        let other_private = dir.path().join("other-private.pem");
-        let other_public = dir.path().join("other-public.pem");
-        keygen(&other_private, &other_public)?;
-        assert!(verify(&manifest, &signature, &other_public, &asset).is_err());
         let absent = dir.path().join("unlisted-binary");
         fs::write(&absent, b"test release content")?;
-        assert!(verify(&manifest, &signature, &public, &absent).is_err());
-        fs::write(&signature, [0_u8; 64])?;
-        assert!(verify(&manifest, &signature, &public, &asset).is_err());
-        fs::write(&signature, [0_u8; 63])?;
-        assert!(verify(&manifest, &signature, &public, &asset).is_err());
-        assert!(keygen(&private, &public).is_err());
+        assert!(verify(&manifest, &absent).is_err());
+        fs::write(&manifest, format!("{original}{original}"))?;
+        assert!(verify(&manifest, &asset).is_err());
+        fs::write(&manifest, b"invalid manifest")?;
+        assert!(verify(&manifest, &asset).is_err());
         Ok(())
     }
 

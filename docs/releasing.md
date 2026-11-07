@@ -1,47 +1,15 @@
-# Releases and update trust
+# Releases and automatic updates
 
-Release artifacts are signed prebuilt executables. Build and signing operations
-run in GitHub Actions or on a maintainer workstation. Production servers verify
-and install binaries; they never compile source code.
+GitHub Actions builds precompiled Linux executables and publishes a `SHA256SUMS`
+file alongside them. The installer and updater download both over HTTPS from the
+configured GitHub repository and verify the binary's checksum before executing
+or installing it. GitHub is the trusted distribution source; the checksum checks
+that the downloaded bytes match the release.
 
-## One-time maintainer setup
-
-1. Protect `main` and the `v*` release tags. Restrict who can publish releases and
-   modify the release workflow. Require review for workflow/deployment changes.
-2. Create the GitHub Actions environment named `release`. Apply appropriate
-   approval rules and restrict deployment refs. Pull-request validation must not
-   receive production signing credentials.
-3. Generate an Ed25519 signing key on a trusted workstation using the Rust CLI.
-   Keep private keys outside the repository, even temporarily.
-
-```bash
-cargo build --locked --release
-mkdir -p "$HOME/jcb-api-release-keys"
-chmod 700 "$HOME/jcb-api-release-keys"
-./target/release/jcb-api release-keygen \
-  --private-key "$HOME/jcb-api-release-keys/release.private.pem" \
-  --public-key "$HOME/jcb-api-release-keys/release-public.pem"
-```
-
-4. Store the complete private PKCS8 PEM as the `RELEASE_SIGNING_KEY` secret and
-   the complete public SPKI PEM as the `RELEASE_PUBLIC_KEY` variable available to
-   the `release` environment. GitHub's Settings → Environments → release screen
-   can be used; do not paste the private key into an issue, commit, or workflow.
-5. Back up the private key securely. Distribute the public key and its fingerprint
-   through a trusted channel. Administrators provide that trusted public key to
-   the installer. A key downloaded beside an unsigned binary proves nothing.
-
-A public-key fingerprint can be compared independently with OpenSSL:
-
-```bash
-openssl pkey -pubin \
-  -in "$HOME/jcb-api-release-keys/release-public.pem" -outform DER |
-  openssl dgst -sha256
-```
-
-A compromised signing key requires a deliberate trust-key replacement on installed
-servers. Automatic acceptance of arbitrary new keys would defeat signature
-verification. The updater therefore does not silently rotate its own trust root.
+No signing keys, custom secrets, or GitHub environment setup are required.
+Publishing uses the automatically provided `GITHUB_TOKEN`, with write permission
+only in the publication job. Production servers download public releases without
+credentials and do not compile source code.
 
 ## Publish a version
 
@@ -66,14 +34,13 @@ The release workflow rejects a version mismatch. It builds both supported target
 | `aarch64-unknown-linux-musl` | `jcb-api-aarch64-unknown-linux-musl` |
 
 Native Linux runners build each target. The final release contains both raw
-executables, `SHA256SUMS`, and `SHA256SUMS.sig`. The signature is the raw 64-byte
-Ed25519 signature over the exact manifest bytes. Signatures authenticate the
-manifest; SHA-256 entries bind each asset's name to its bytes.
+executables and `SHA256SUMS`, generated using `sha256sum` after the builds pass.
+The workflow checks both hashes and uploads all three files before publishing
+the release.
 
 The workflow can also publish SemVer prerelease tags, marked as prereleases on
 GitHub. Only stable releases are eligible for automatic installation. A published release
-is not overwritten. Use a new version for corrected published artifacts. The
-workflow fails closed when signing material is absent or does not match.
+is not overwritten. Use a new version for corrected published artifacts.
 
 ## Backfill an existing tag
 
@@ -89,28 +56,28 @@ Publication uses GitHub's legacy semantic-version policy for selecting the
 latest stable release, so publishing a backfill does not automatically promote
 it merely because it was the most recent workflow run.
 
-CI exercises builds and signature checks with temporary test keys. Those keys are
-never trusted by production installers. PR checks exercise packaging, signature
-interoperability, and release-selection logic without production credentials.
-Publishing with the real signing key is a separate run after maintainer setup.
+CI exercises both architecture builds, checksum verification, rejection of a
+modified binary, and release-selection logic. Publishing runs when a version tag
+is pushed, or when a backfill is requested after the workflow is on `main`.
 
 ## Manual verification
 
 The native CLI can verify a previously downloaded release set:
 
 ```bash
-sudo /opt/jcb-api/current/jcb-api release-verify \
+/opt/jcb-api/current/jcb-api release-verify \
   --manifest SHA256SUMS \
-  --signature SHA256SUMS.sig \
-  --public-key /etc/jcb-api/release-public.pem \
   --asset jcb-api-x86_64-unknown-linux-musl
 ```
 
-Choose the artifact matching the host architecture. This checks both signature
-and digest; it does not execute the downloaded program. The bootstrap installer
-uses OpenSSL for the equivalent first-install verification, before a trusted Rust
-binary is available. Downloaded binaries must never be used to verify themselves
-before their signatures have been checked.
+Choose the artifact matching the host architecture. This checks its hash against
+the manifest without executing the downloaded program. For a first installation,
+the bootstrap installer uses the system's `sha256sum` before running the binary.
+If both architecture files were downloaded, the standard command also works:
+
+```bash
+sha256sum --check SHA256SUMS
+```
 
 ## Update operations
 

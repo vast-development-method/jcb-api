@@ -73,10 +73,8 @@ done
 [[ "$ready" == true ]] || fail 'Rust service did not become healthy'
 jq -e '.status == "ok"' "$workspace/health.json" > /dev/null
 
-printf 'Render-only public key fixture\n' > "$workspace/public.pem"
 cat > "$workspace/deploy.conf" <<EOF
 DOMAIN=api.example.org
-PUBLIC_KEY_FILE=$workspace/public.pem
 ENABLE_HTTPS=false
 SERVER_MEMORY_MB=512
 SERVER_CPU_COUNT=2

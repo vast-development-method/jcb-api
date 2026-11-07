@@ -4,6 +4,4 @@
 *.sock
 /cache*.json
 /tokens.json
-*.private.pem
-/release-keys/
 /dist/

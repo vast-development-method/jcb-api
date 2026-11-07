@@ -50,7 +50,7 @@ jobs:
         id: tests
         continue-on-error: true
         run: cargo test --locked --all-targets
-      - name: CLI, migration, and signing smoke test
+      - name: CLI, migration, and release checksum smoke test
         id: smoke
         continue-on-error: true
         run: |
