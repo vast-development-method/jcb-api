@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Resolve a release without building, signing, changing Git, or publishing it.
+# Resolve a release without building, changing Git, or publishing it.
 set -euo pipefail
 
 release_tag=

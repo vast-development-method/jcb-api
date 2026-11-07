@@ -171,25 +171,22 @@ stop_service
 if grep -Fq -- "$new_token" "$workspace/service.log"; then fail 'logs contain a generated token'; fi
 if grep -Fq 'legacy-smoke-token' "$workspace/service.log"; then fail 'logs contain a legacy token'; fi
 
-# Exercise the exact signature format used by deployment and release workflows.
-"$binary" release-keygen --private-key "$workspace/private.pem" --public-key "$workspace/public.pem"
+# Exercise the exact checksum format used by deployment and release workflows.
 cp "$binary" "$workspace/jcb-api-x86_64-unknown-linux-musl"
 (
     cd "$workspace"
     sha256sum jcb-api-x86_64-unknown-linux-musl > SHA256SUMS
 )
-"$binary" release-sign --manifest "$workspace/SHA256SUMS" --private-key "$workspace/private.pem" --signature "$workspace/SHA256SUMS.sig"
-"$binary" release-verify --manifest "$workspace/SHA256SUMS" --signature "$workspace/SHA256SUMS.sig" \
-    --public-key "$workspace/public.pem" --asset "$workspace/jcb-api-x86_64-unknown-linux-musl"
-openssl pkeyutl -verify -pubin -rawin -inkey "$workspace/public.pem" \
-    -in "$workspace/SHA256SUMS" -sigfile "$workspace/SHA256SUMS.sig"
-openssl pkeyutl -sign -rawin -inkey "$workspace/private.pem" -in "$workspace/SHA256SUMS" -out "$workspace/openssl.sig"
-"$binary" release-verify --manifest "$workspace/SHA256SUMS" --signature "$workspace/openssl.sig" \
-    --public-key "$workspace/public.pem" --asset "$workspace/jcb-api-x86_64-unknown-linux-musl"
+"$binary" release-verify --manifest "$workspace/SHA256SUMS" \
+    --asset "$workspace/jcb-api-x86_64-unknown-linux-musl"
+cp "$binary" "$workspace/jcb-api-unlisted"
+if "$binary" release-verify --manifest "$workspace/SHA256SUMS" --asset "$workspace/jcb-api-unlisted"; then
+    fail 'release asset missing from the checksum manifest was accepted'
+fi
 printf 'tampered' >> "$workspace/jcb-api-x86_64-unknown-linux-musl"
-if "$binary" release-verify --manifest "$workspace/SHA256SUMS" --signature "$workspace/SHA256SUMS.sig" \
-    --public-key "$workspace/public.pem" --asset "$workspace/jcb-api-x86_64-unknown-linux-musl"; then
+if "$binary" release-verify --manifest "$workspace/SHA256SUMS" \
+    --asset "$workspace/jcb-api-x86_64-unknown-linux-musl"; then
     fail 'tampered release asset was accepted'
 fi
 
-printf 'API, CLI, migration, burst, restart, and signature smoke checks passed.\n'
+printf 'API, CLI, migration, burst, restart, and release checksum smoke checks passed.\n'

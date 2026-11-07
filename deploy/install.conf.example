@@ -9,8 +9,6 @@ CONFIG_DIR=/etc/jcb-api
 SERVICE_NAME=jcb-api
 SERVICE_USER=jcb-api
 NGINX_GROUP=www-data
-# Obtain this public key from the maintainer through a trusted channel.
-PUBLIC_KEY_FILE=/etc/jcb-api/release-public.pem
 SERVER_MEMORY_MB=512
 SERVER_CPU_COUNT=2
 ENABLE_HTTPS=true

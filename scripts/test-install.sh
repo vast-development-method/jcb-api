@@ -4,11 +4,8 @@ set -Eeuo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TEST_DIR"' EXIT
-mkdir -p "$TEST_DIR/source"
-printf 'public key data is not executed in render mode\n' > "$TEST_DIR/source/release-public.pem"
 cat > "$TEST_DIR/base.conf" <<EOF
 DOMAIN=api.example.org
-PUBLIC_KEY_FILE=$TEST_DIR/source/release-public.pem
 ENABLE_HTTPS=false
 SERVER_MEMORY_MB=512 # supported inline comment
 SERVER_CPU_COUNT=2
@@ -34,7 +31,7 @@ require_text "$TEST_DIR/http/jcb-api.service" 'Group=www-data'
 require_text "$TEST_DIR/http/jcb-api.env" 'MAX_STATE_BYTES=8388608'
 require_text "$TEST_DIR/http/jcb-api.env" 'PUBLIC_BASE_URL=http://api.example.org'
 require_text "$TEST_DIR/http/jcb-api.env" 'API_SOCKET_PATH=/run/jcb-api/api.sock'
-require_text "$TEST_DIR/http/jcb-api-update.service" '--public-key /etc/jcb-api/release-public.pem'
+require_text "$TEST_DIR/http/jcb-api-update.service" '--install-dir /opt/jcb-api --socket /run/jcb-api/api.sock'
 require_text "$TEST_DIR/http/jcb-api-update.service" 'TimeoutStartSec=15min'
 require_text "$TEST_DIR/http/nginx.conf" 'if ($http_authorization = "") { return 403; }'
 require_text "$TEST_DIR/http/nginx.conf" 'burst=500 nodelay;'
@@ -92,6 +89,23 @@ reject MAX_STATE_BYTES 50331648
 # Exercise the exact publication helper: it refuses both existing and dangling
 # links, creates private files, and never overwrites an existing record.
 source scripts/install.sh
+mkdir "$TEST_DIR/download"
+printf 'release binary bytes\n' > "$TEST_DIR/download/jcb-api-test"
+release_hash=$(sha256sum "$TEST_DIR/download/jcb-api-test"); release_hash=${release_hash%% *}
+printf '%s  jcb-api-test\n' "$release_hash" > "$TEST_DIR/download/SHA256SUMS"
+verify_release_checksum "$TEST_DIR/download/SHA256SUMS" "$TEST_DIR/download/jcb-api-test" jcb-api-test > /dev/null
+printf 'altered binary bytes\n' > "$TEST_DIR/download/jcb-api-test"
+if verify_release_checksum "$TEST_DIR/download/SHA256SUMS" "$TEST_DIR/download/jcb-api-test" jcb-api-test; then
+    printf 'Checksum verifier accepted altered bytes\n' >&2; exit 1
+fi
+printf '%s  other-binary\n' "$release_hash" > "$TEST_DIR/download/SHA256SUMS"
+if verify_release_checksum "$TEST_DIR/download/SHA256SUMS" "$TEST_DIR/download/jcb-api-test" jcb-api-test; then
+    printf 'Checksum verifier accepted a missing asset\n' >&2; exit 1
+fi
+printf '%s  jcb-api-test\n%s  jcb-api-test\n' "$release_hash" "$release_hash" > "$TEST_DIR/download/SHA256SUMS"
+if verify_release_checksum "$TEST_DIR/download/SHA256SUMS" "$TEST_DIR/download/jcb-api-test" jcb-api-test; then
+    printf 'Checksum verifier accepted duplicate asset entries\n' >&2; exit 1
+fi
 mkdir "$TEST_DIR/state" "$TEST_DIR/outside"
 printf 'private sentinel\n' > "$TEST_DIR/outside/existing"
 ln -s "$TEST_DIR/outside/existing" "$TEST_DIR/state/cache.json"

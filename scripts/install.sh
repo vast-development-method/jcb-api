@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guided, repeatable installation of signed JCB API releases on Debian/Ubuntu.
+# Guided installation of JCB API releases with SHA-256 download verification.
 # This file is deliberately self-contained so it can be downloaded on its own.
 set -Eeuo pipefail
 umask 077
@@ -7,6 +7,23 @@ umask 077
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Required command is missing: $1"; }
+
+verify_release_checksum() {
+    local manifest=$1 asset=$2 name=$3 expected actual
+    expected=$(awk -v name="$name" '
+        NF != 2 { invalid=1; next }
+        $2 == name {
+            count++
+            if (length($1) != 64 || $1 !~ /^[0-9a-f]+$/) invalid=1
+            digest=$1
+        }
+        END { if (invalid || count != 1) exit 1; print digest }
+    ' "$manifest") || { printf 'Checksum manifest must contain exactly one valid matching asset\n' >&2; return 1; }
+    actual=$(sha256sum -- "$asset") || return 1
+    actual=${actual%% *}
+    [[ $expected == "$actual" ]] || { printf 'Release binary checksum verification failed\n' >&2; return 1; }
+    printf '%s\n' "$expected"
+}
 
 # Call only as the unprivileged service account. Publishing by hard link is
 # atomic and never overwrites an existing file, including a dangling symlink.
@@ -34,7 +51,7 @@ seed_state_file() {
     [[ -f $target && ! -L $target ]]
 }
 
-# Sourcing exposes only the safe publication helper to offline regression tests.
+# Sourcing exposes only the verification/publication helpers to offline tests.
 # It never starts the installer or changes the host.
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return 0; fi
 
@@ -63,7 +80,6 @@ CONFIG_DIR=/etc/jcb-api
 SERVICE_NAME=jcb-api
 SERVICE_USER=jcb-api
 NGINX_GROUP=www-data
-PUBLIC_KEY_FILE=''
 SERVER_MEMORY_MB=512
 SERVER_CPU_COUNT=2
 NETWORK_RATE=100
@@ -111,7 +127,7 @@ read_config() {
         [[ $line =~ ^([A-Z][A-Z0-9_]*)[[:space:]]*=(.*)$ ]] || die "Invalid configuration line in $file"
         key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
         case "$key" in
-            REPOSITORY|DOMAIN|INSTALL_DIR|STATE_DIR|CONFIG_DIR|SERVICE_NAME|SERVICE_USER|NGINX_GROUP|PUBLIC_KEY_FILE|SERVER_MEMORY_MB|SERVER_CPU_COUNT|NETWORK_RATE|NETWORK_BURST|WEBHOOK_RATE|WEBHOOK_BURST|AUTO_UPDATE|UPDATE_INTERVAL|ENABLE_HTTPS|ACME_EMAIL|LEGACY_ENV_FILE|RELEASE_VERSION|TRUSTED_PROXY_CIDRS|LOG_NETWORK_REQUESTS|LOG_QUEUE_CAPACITY|MAX_CONTENT_LENGTH|MAX_STATE_BYTES|POLL_INTERVAL_SECONDS) ;;
+            REPOSITORY|DOMAIN|INSTALL_DIR|STATE_DIR|CONFIG_DIR|SERVICE_NAME|SERVICE_USER|NGINX_GROUP|SERVER_MEMORY_MB|SERVER_CPU_COUNT|NETWORK_RATE|NETWORK_BURST|WEBHOOK_RATE|WEBHOOK_BURST|AUTO_UPDATE|UPDATE_INTERVAL|ENABLE_HTTPS|ACME_EMAIL|LEGACY_ENV_FILE|RELEASE_VERSION|TRUSTED_PROXY_CIDRS|LOG_NETWORK_REQUESTS|LOG_QUEUE_CAPACITY|MAX_CONTENT_LENGTH|MAX_STATE_BYTES|POLL_INTERVAL_SECONDS) ;;
             *) die "Unknown configuration key: $key" ;;
         esac
         parse_value "$value"
@@ -133,7 +149,6 @@ ask STATE_DIR 'Persistent application data directory'
 ask CONFIG_DIR 'Configuration directory'
 ask SERVICE_NAME 'Systemd service name'
 ask SERVICE_USER 'Dedicated Linux account'
-ask PUBLIC_KEY_FILE 'Trusted release public key PEM file'
 ask SERVER_MEMORY_MB 'Total memory allocated to this installation in MiB'
 ask SERVER_CPU_COUNT 'CPU allocation'
 ask LEGACY_ENV_FILE 'Existing .env to migrate; leave empty for a fresh installation'
@@ -162,9 +177,6 @@ for parent in "$INSTALL_DIR" "$STATE_DIR" "$CONFIG_DIR"; do
     done
 done
 [[ -z $LEGACY_ENV_FILE ]] || valid_path "$LEGACY_ENV_FILE"
-[[ -n $PUBLIC_KEY_FILE ]] || die 'PUBLIC_KEY_FILE must name a trusted Ed25519 public key obtained from the maintainer'
-valid_path "$PUBLIC_KEY_FILE"
-[[ -f $PUBLIC_KEY_FILE && ! -L $PUBLIC_KEY_FILE ]] || die 'PUBLIC_KEY_FILE is not a regular file'
 number SERVER_MEMORY_MB 256 1048576
 number SERVER_CPU_COUNT 1 256
 number NETWORK_RATE 1 1000000
@@ -361,7 +373,7 @@ Wants=network-online.target
 Type=oneshot
 User=root
 UMask=0077
-ExecStart=$INSTALL_DIR/current/jcb-api update --repository $REPOSITORY --install-dir $INSTALL_DIR --public-key $CONFIG_DIR/release-public.pem --socket $API_SOCKET_PATH --service $SERVICE_NAME.service
+ExecStart=$INSTALL_DIR/current/jcb-api update --repository $REPOSITORY --install-dir $INSTALL_DIR --socket $API_SOCKET_PATH --service $SERVICE_NAME.service
 TimeoutStartSec=15min
 Nice=10
 IOSchedulingClass=idle
@@ -400,7 +412,7 @@ EOF
 for key in REPOSITORY DOMAIN INSTALL_DIR STATE_DIR CONFIG_DIR SERVICE_NAME SERVICE_USER NGINX_GROUP SERVER_MEMORY_MB SERVER_CPU_COUNT NETWORK_RATE NETWORK_BURST WEBHOOK_RATE WEBHOOK_BURST AUTO_UPDATE UPDATE_INTERVAL ENABLE_HTTPS ACME_EMAIL LEGACY_ENV_FILE TRUSTED_PROXY_CIDRS LOG_NETWORK_REQUESTS LOG_QUEUE_CAPACITY MAX_CONTENT_LENGTH MAX_STATE_BYTES POLL_INTERVAL_SECONDS; do
     printf '%s=%s\n' "$key" "${!key}"
 done > "$OUTPUT_DIR/install.conf"
-printf 'PUBLIC_KEY_FILE=%s/release-public.pem\nRELEASE_VERSION=latest\n' "$CONFIG_DIR" >> "$OUTPUT_DIR/install.conf"
+printf 'RELEASE_VERSION=latest\n' >> "$OUTPUT_DIR/install.conf"
 
 if [[ -n $RENDER_DIR ]]; then
     note "Validated configuration and rendered deployment files in $OUTPUT_DIR"
@@ -412,8 +424,8 @@ fi
 need systemctl
 need apt-get
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq openssl nginx
-need curl; need jq; need openssl; need sha256sum; need flock
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq nginx
+need curl; need jq; need sha256sum; need flock
 
 # Release/config parents must not allow the runtime account (or another ordinary
 # user) to replace a path later traversed by the root-owned updater.
@@ -434,7 +446,6 @@ install -d -m 0755 -o root -g root "$INSTALL_DIR"
 exec 9>"$INSTALL_DIR/.update.lock"
 chmod 0600 "$INSTALL_DIR/.update.lock"
 flock -n 9 || die 'Another installer or updater is already running'
-install -m 0600 "$PUBLIC_KEY_FILE" "$TEMP_DIR/trusted-public.pem"
 
 # Do not silently leave a legacy vhost serving the same name ahead of this one.
 # The operator may disable that symlink while retaining its original file.
@@ -456,20 +467,14 @@ curl --fail --silent --show-error --location --proto '=https' --proto-redir '=ht
 TAG=$(jq -er '.tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$TEMP_DIR/release.json") || die 'GitHub returned an invalid stable release'
 jq -e '.draft == false and .prerelease == false' "$TEMP_DIR/release.json" >/dev/null || die 'Refusing a draft or prerelease'
 ASSET="jcb-api-$TARGET"
-for asset in SHA256SUMS SHA256SUMS.sig "$ASSET"; do
+for asset in SHA256SUMS "$ASSET"; do
     # Construct URLs from the validated repository, tag and fixed asset names.
     curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 180 --max-filesize 67108864 \
         "https://github.com/$REPOSITORY/releases/download/$TAG/$asset" -o "$TEMP_DIR/$asset"
 done
-[[ $(wc -c < "$TEMP_DIR/SHA256SUMS.sig") -eq 64 ]] || die 'Release signature must be 64 Ed25519 bytes'
-PUBLIC_KEY_INFO=$(openssl pkey -pubin -in "$TEMP_DIR/trusted-public.pem" -text -noout) || die 'Invalid release public key'
-[[ $PUBLIC_KEY_INFO == *ED25519* ]] || die 'Release key must be Ed25519'
-openssl pkeyutl -verify -pubin -inkey "$TEMP_DIR/trusted-public.pem" -rawin -in "$TEMP_DIR/SHA256SUMS" -sigfile "$TEMP_DIR/SHA256SUMS.sig" >/dev/null || die 'Release signature verification failed'
-DIGEST=$(awk -v name="$ASSET" '$2 == name && length($1) == 64 && $1 ~ /^[0-9a-f]+$/ { print $1; count++ } END { if (count != 1) exit 1 }' "$TEMP_DIR/SHA256SUMS") || die 'Signed manifest must contain exactly one matching asset'
-ACTUAL_DIGEST=$(sha256sum "$TEMP_DIR/$ASSET"); ACTUAL_DIGEST=${ACTUAL_DIGEST%% *}
-[[ $DIGEST == "$ACTUAL_DIGEST" ]] || die 'Release binary checksum verification failed'
+DIGEST=$(verify_release_checksum "$TEMP_DIR/SHA256SUMS" "$TEMP_DIR/$ASSET" "$ASSET") || die 'Release download verification failed'
 chmod 0755 "$TEMP_DIR/$ASSET"
-[[ $("$TEMP_DIR/$ASSET" --version) == "jcb-api ${TAG#v}" ]] || die 'Signed binary version does not match the release tag'
+[[ $("$TEMP_DIR/$ASSET" --version) == "jcb-api ${TAG#v}" ]] || die 'Binary version does not match the release tag'
 
 getent group "$NGINX_GROUP" >/dev/null || die "Nginx group does not exist: $NGINX_GROUP"
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
@@ -529,7 +534,6 @@ if [[ -e $CONFIG_DIR/.env ]]; then
     install -m 0600 "$CONFIG_DIR/.env" "$CONFIG_DIR/.env.before-install"
 fi
 install -m 0640 -o root -g "$NGINX_GROUP" "$OUTPUT_DIR/jcb-api.env" "$CONFIG_DIR/.env"
-install -m 0644 -o root -g root "$TEMP_DIR/trusted-public.pem" "$CONFIG_DIR/release-public.pem"
 install -m 0600 -o root -g root "$OUTPUT_DIR/install.conf" "$CONFIG_DIR/install.conf"
 if [[ -e $INSTALL_DIR/releases/$TAG/jcb-api ]]; then
     [[ ! -L $INSTALL_DIR/releases/$TAG/jcb-api ]] || die 'Release binaries must not be symlinks'

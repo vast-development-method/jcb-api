@@ -41,16 +41,13 @@ when none is configured, so a new domain does not require editing code.
 2. Point the domain's DNS records to the server. Open TCP 80 and 443 in the
    firewall and upstream security group if the installer is to configure HTTPS.
    If publishing an AAAA record, ensure IPv6 reaches the same server.
-3. Obtain the release **public key PEM** from the maintainer through a trusted
-   channel and save it locally. Verify its fingerprint through that channel.
-   Do not trust a key merely because it accompanies the downloaded binary.
-4. Ensure at least one signed, stable GitHub Release exists. Maintainers should
-   complete [release setup](docs/releasing.md) before installing the first server.
-5. For migration, retain the old `.env`, cache, token file, and logs. The installer
+3. Ensure at least one stable GitHub Release exists. Maintainers can follow the
+   [release instructions](docs/releasing.md) to publish the first version.
+4. For migration, retain the old `.env`, cache, token file, and logs. The installer
    can import the cache and tokens; it does not delete or overwrite those sources.
 
-Public releases are downloadable without a GitHub token. The server never needs
-repository write access or release signing credentials.
+Public releases are downloadable without a GitHub token. Installation and updates
+need no additional credentials or key setup.
 
 ## Install
 
@@ -65,13 +62,13 @@ sudo bash ./jcb-api-install.sh
 ```
 
 It asks for the domain, installation/state/configuration directories, service
-name and account, trusted public key file, CPU/memory allocation, optional legacy
+name and account, CPU/memory allocation, optional legacy
 `.env`, HTTPS email, and whether to enable automatic updates. Press Enter to
-accept an offered default. Supply an actual domain and public-key path when
-asked; those intentionally have no production default.
+accept an offered default. Supply the actual domain when asked.
 
-The installer verifies the release manifest's Ed25519 signature and the binary's
-SHA-256 digest **before executing it**, checks the reported version, creates the
+The installer downloads the binary and `SHA256SUMS` from the configured GitHub
+release over HTTPS and checks the binary's SHA-256 digest **before executing it**.
+It then checks the reported version, creates the
 service account, and configures systemd and Nginx. HTTPS uses Let's Encrypt via
 Certbot; the renewal hook reloads Nginx. The first service activation gets a small
 local health check. A previous binary is restored when activation fails.
@@ -84,7 +81,6 @@ The default layout is:
 | `/opt/jcb-api/current` | Atomic symlink to the active release |
 | `/etc/jcb-api/.env` | Runtime configuration; no embedded token secrets |
 | `/etc/jcb-api/install.conf` | Root-only saved deployment settings |
-| `/etc/jcb-api/release-public.pem` | Trusted update verification key |
 | `/var/lib/jcb-api/cache.json` | Durable network state |
 | `/var/lib/jcb-api/tokens.json` | Private token state |
 | `/run/jcb-api/api.sock` | Public HTTP socket; Nginx group access |
@@ -148,8 +144,8 @@ bash ./jcb-api-install.sh --config ./install.conf \
   --non-interactive --render-only ./rendered-deployment
 ```
 
-`install.conf` must contain the intended deployment values and a real trusted
-public-key file. Render mode still validates the configuration.
+`install.conf` must contain the intended deployment values. Render mode validates
+the configuration.
 
 ## Local administration
 
@@ -256,7 +252,7 @@ Original file logs remain available separately for historical inspection.
 
 The optional `jcb-api-update.timer` checks stable GitHub Releases at the configured
 interval (15 minutes by default, with jitter). The separate root updater verifies
-the signed manifest and digest, refuses downgrades, stages the correct native
+the binary against the release's `SHA256SUMS`, refuses downgrades, stages the correct native
 binary, switches the release symlink, restarts the service, and checks the running
 version through the local socket. Failed activation restores the previous
 release. A failed verified release directory is retained for inspection. A later
@@ -315,8 +311,7 @@ temporary local instances and never contact the production API.
 
 CI verifies the public API, dynamic growth, durable mutations, token lifecycle,
 local administration, documentation, migration behavior, installer rendering,
-Nginx token rejection and a 100-call burst, signature verification, and
+Nginx token rejection and a 100-call burst, checksum verification, and
 release/backfill tag validation. Release builds cover x86-64 and ARM64 Linux with
-musl. CI uses temporary keys for signing tests; production keys are never used in
-pull-request jobs. See [maintainer release setup](docs/releasing.md) for versioned
+musl. See [release instructions](docs/releasing.md) for versioned
 publishing and backfill builds. The repository's [LICENSE](LICENSE) applies.

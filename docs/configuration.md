@@ -17,7 +17,6 @@ that reconfiguration can regenerate Nginx/systemd consistently.
 | `SERVICE_NAME` | `jcb-api` |
 | `SERVICE_USER` | `jcb-api`, dedicated unprivileged Linux account |
 | `NGINX_GROUP` | `www-data`, grants access only to the public socket |
-| `PUBLIC_KEY_FILE` | Required trusted Ed25519 public key in SPKI PEM format |
 | `SERVER_MEMORY_MB` | `512`, total memory allocation in MiB; minimum 256 |
 | `SERVER_CPU_COUNT` | `2`, CPU allocation |
 | `NETWORK_RATE` | `100`, sustained public requests per second per client IP |
