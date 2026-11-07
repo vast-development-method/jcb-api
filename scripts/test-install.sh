@@ -35,6 +35,7 @@ require_text "$TEST_DIR/http/jcb-api.env" 'MAX_STATE_BYTES=8388608'
 require_text "$TEST_DIR/http/jcb-api.env" 'PUBLIC_BASE_URL=http://api.example.org'
 require_text "$TEST_DIR/http/jcb-api.env" 'API_SOCKET_PATH=/run/jcb-api/api.sock'
 require_text "$TEST_DIR/http/jcb-api-update.service" '--public-key /etc/jcb-api/release-public.pem'
+require_text "$TEST_DIR/http/jcb-api-update.service" 'TimeoutStartSec=15min'
 require_text "$TEST_DIR/http/nginx.conf" 'if ($http_authorization = "") { return 403; }'
 require_text "$TEST_DIR/http/nginx.conf" 'burst=500 nodelay;'
 require_text "$TEST_DIR/http/nginx.conf" 'limit_req_status 429;'
@@ -62,6 +63,8 @@ require_text "$TEST_DIR/https/nginx.conf" 'listen 443 ssl;'
 require_text "$TEST_DIR/https/nginx.conf" 'set_real_ip_from 192.0.2.0/24;'
 require_text "$TEST_DIR/https/nginx.conf" 'set_real_ip_from 2001:db8::/32;'
 require_text "$TEST_DIR/https/nginx.conf" 'proxy_pass http://unix:/run/custom-api/api.sock;'
+require_text "$TEST_DIR/https/nginx-acme.conf" 'location / { return 503; }'
+[[ $(<"$TEST_DIR/https/nginx-acme.conf") != *proxy_pass* ]] || { printf 'Certificate enrollment exposes application over HTTP\n' >&2; exit 1; }
 
 reject DOMAIN 'example.org; touch /tmp/should-not-exist'
 reject DOMAIN 'example..org'
@@ -84,6 +87,9 @@ reject MAX_STATE_BYTES 999999999
 
 # Optional native parser validation in CI environments that install nginx.
 if command -v nginx >/dev/null 2>&1; then
+    # Nginx resolves relative includes against the main configuration directory.
+    # Production's main file is /etc/nginx/nginx.conf; this isolated test moves it.
+    cp /etc/nginx/proxy_params "$TEST_DIR/proxy_params"
     cat > "$TEST_DIR/nginx-test.conf" <<EOF
 error_log $TEST_DIR/nginx-error.log;
 pid $TEST_DIR/nginx.pid;
@@ -99,5 +105,13 @@ http {
 }
 EOF
     nginx -t -p /etc/nginx/ -c "$TEST_DIR/nginx-test.conf"
+fi
+if command -v systemd-analyze >/dev/null 2>&1; then
+    mkdir "$TEST_DIR/units"
+    cp "$TEST_DIR/http/jcb-api.service" "$TEST_DIR/http/jcb-api-update.service" "$TEST_DIR/http/jcb-api-update.timer" "$TEST_DIR/units/"
+    # The published binary is intentionally not installed by these offline tests.
+    # Substitute a known executable so systemd can validate all other directives.
+    sed -i 's|^ExecStart=.*|ExecStart=/bin/true|' "$TEST_DIR/units/jcb-api.service" "$TEST_DIR/units/jcb-api-update.service"
+    systemd-analyze verify --man=no "$TEST_DIR/units/jcb-api.service" "$TEST_DIR/units/jcb-api-update.service" "$TEST_DIR/units/jcb-api-update.timer"
 fi
 printf 'Installer render, resource, routing and injection checks passed.\n'

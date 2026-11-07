@@ -77,8 +77,9 @@ chmod 0600 "$workspace/.env" "$workspace/tokens.json"
 
 "$binary" --version | grep -Eq '^jcb-api [0-9]+\.[0-9]+\.[0-9]+'
 "$binary" --help > /dev/null
-cli check > /dev/null
+if cli check > /dev/null 2>&1; then fail 'check reported a healthy service before startup'; fi
 start_service
+cli check > /dev/null
 
 # Existing data and tokens are usable without translation or credential replacement.
 expect_code 200 http://localhost/v1/network/community/jcb/legacy

@@ -7,7 +7,7 @@ use fs2::FileExt;
 use percent_encoding::percent_decode_str;
 use rand::{rngs::OsRng, RngCore};
 use serde_json::{json, Value};
-use std::{fs::{self, File, OpenOptions}, io, os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}, pin::Pin, sync::Arc, task::{Context as TaskContext, Poll}, time::Duration};
+use std::{fs::{self, File, OpenOptions}, io, os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}, pin::Pin, sync::Arc, task::{Context as TaskContext, Poll}, time::Duration};
 use tokio::{io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf}, net::{UnixListener, UnixStream}, sync::{watch, OwnedSemaphorePermit, Semaphore}, task::JoinSet};
 
 #[derive(Clone)]
@@ -99,16 +99,30 @@ async fn webhook(state:&AppState,system:&str,project:&str,target:&str,req:Reques
     let Some(heartbeat)=value.get("heartbeat").and_then(Value::as_object) else{return error(StatusCode::BAD_REQUEST,"Missing heartbeat data")};
     let Some(id)=heartbeat.get("monitorID") else{return error(StatusCode::BAD_REQUEST,"Invalid heartbeat data")};
     let Some(status)=heartbeat.get("status").and_then(Value::as_i64) else{return error(StatusCode::BAD_REQUEST,"Invalid heartbeat data")};
-    if !id.is_string() && !id.is_i64() && !id.is_u64(){return error(StatusCode::BAD_REQUEST,"Invalid heartbeat data");}
-    if [system,project,target].iter().any(|s|s.len()>256){return error(StatusCode::BAD_REQUEST,"Invalid network path");}
+    let valid_id = id.is_i64() || id.is_u64() || id.as_str().is_some_and(|s|!s.is_empty() && s.len()<=256 && !s.chars().any(char::is_control));
+    if !valid_id{return error(StatusCode::BAD_REQUEST,"Invalid heartbeat data");}
+    if [system,project,target].iter().any(|s|s.is_empty() || s.len()>256 || s.contains('/') || s.chars().any(char::is_control)){return error(StatusCode::BAD_REQUEST,"Invalid network path");}
     let monitor=value.get("monitor").and_then(Value::as_object);
     for field in ["name","url"] {if let Some(v)=monitor.and_then(|m|m.get(field)){if v.as_str().is_none_or(|s|s.len()>16*1024){return error(StatusCode::BAD_REQUEST,"Invalid monitor data");}}}
-    let msg=value.get("msg").filter(|v|v.as_str().is_some_and(|s|!s.is_empty())).or_else(||heartbeat.get("msg")).cloned().unwrap_or(json!("N/A"));
-    tracing::info!(system,project,target,monitor_id=%id,status,msg=%msg,monitor_name=%monitor.and_then(|m|m.get("name")).unwrap_or(&Value::Null),url=%monitor.and_then(|m|m.get("url")).unwrap_or(&Value::Null),"Webhook request received");
+    let msg=value.get("msg").filter(|v|v.as_str().is_some_and(|s|!s.is_empty())).or_else(||heartbeat.get("msg"));
+    let msg=bounded_log_message(msg);
+    tracing::info!(system,project,target,monitor_id=%id,status,msg=%msg,monitor_name=%monitor.and_then(|m|m.get("name")).unwrap_or(&serde_json::Value::Null),url=%monitor.and_then(|m|m.get("url")).unwrap_or(&serde_json::Value::Null),"Webhook request received");
     match state.engine.upsert(system,project,target,&value).await {
         Ok(())=>json_response(StatusCode::OK,json!({"message":format!("Status updated to {}",if status==1{"up"}else{"down"})})),
         Err(e)=>{tracing::error!(error=%e,"Status update failed");error(StatusCode::SERVICE_UNAVAILABLE,"Unable to persist status update")}
     }
+}
+
+/// Keep normal webhook details while ensuring a message cannot occupy an entire
+/// request-sized record in the asynchronous log queue. Only message strings are
+/// logged; unexpected JSON objects are not recursively serialized into logs.
+fn bounded_log_message(value:Option<&Value>)->String {
+    const LIMIT:usize=16*1024;
+    let text=match value {None=>"N/A",Some(Value::String(text))=>text.as_str(),Some(_)=>"[non-string message]"};
+    if text.len()<=LIMIT {return text.to_owned();}
+    let mut end=LIMIT;
+    while !text.is_char_boundary(end){end-=1;}
+    format!("{}...[truncated]",&text[..end])
 }
 
 /// A permit lives as long as its connection, so slow clients cannot cause an
@@ -128,7 +142,13 @@ impl axum::serve::Listener for LimitedListener {
 }
 fn bind_socket(path:&Path,mode:u32)->Result<UnixListener> {
     if let Some(parent)=path.parent(){fs::create_dir_all(parent)?;}
-    match fs::symlink_metadata(path){Ok(metadata)=>{if !metadata.file_type().is_socket(){bail!("Refusing to replace non-socket {}",path.display());}fs::remove_file(path)?;},Err(e) if e.kind()==io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into())}
+    match fs::symlink_metadata(path){Ok(metadata)=>{if !metadata.file_type().is_socket(){bail!("Refusing to replace non-socket {}",path.display());}
+            match std::os::unix::net::UnixStream::connect(path) {
+                Ok(_)=>bail!("Socket {} is already in use",path.display()),
+                Err(e) if e.kind()==io::ErrorKind::ConnectionRefused=>{},
+                Err(e)=>return Err(e).context("Cannot determine whether existing socket is active"),
+            }
+            fs::remove_file(path)?;},Err(e) if e.kind()==io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into())}
     let listener=UnixListener::bind(path)?;fs::set_permissions(path,fs::Permissions::from_mode(mode))?;Ok(listener)
 }
 fn state_lock(path:&Path)->Result<File>{
@@ -138,7 +158,6 @@ fn state_lock(path:&Path)->Result<File>{
 }
 async fn stop(mut rx:watch::Receiver<bool>){if !*rx.borrow(){let _=rx.changed().await;}}
 async fn signal()->Result<()>{let mut term=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;tokio::select!{_ = term.recv()=>{},r=tokio::signal::ctrl_c()=>r?}Ok(())}
-fn stamps(config:&Config)->Vec<Option<(u64,u64,i64,i64)>>{[&config.cache,&config.tokens].iter().map(|p|fs::metadata(p).ok().map(|m|(m.ino(),m.len(),m.mtime(),m.mtime_nsec()))).collect()}
 pub async fn serve(config:Config)->Result<()> {
     let _locks=[state_lock(&config.cache)?,state_lock(&config.tokens)?];
     let engine=Engine::open(config.cache.clone(),config.tokens.clone(),config.max_state_bytes)?;
@@ -148,7 +167,7 @@ pub async fn serve(config:Config)->Result<()> {
     let mut api_task=tokio::spawn(axum::serve(LimitedListener{listener:api,permits:Arc::new(Semaphore::new(config.max_connections))},router(state)).with_graceful_shutdown(stop(rx.clone())).into_future());
     let mut admin_task=tokio::spawn(admin_loop(admin,engine.clone(),rx.clone()));
     let watch_engine=engine.clone();let watch_config=config.clone();let watch_rx=rx.clone();
-    let watcher=tokio::spawn(async move {let mut previous=stamps(&watch_config);loop{tokio::select!{_ = stop(watch_rx.clone())=>break,_=tokio::time::sleep(Duration::from_secs(watch_config.poll_seconds))=>{let current=stamps(&watch_config);if current!=previous {previous=current;match watch_engine.reload().await{Ok(true)=>tracing::info!("External state reloaded"),Ok(false)=>{},Err(e)=>tracing::error!(error=%e,"External state rejected; retaining valid state")}}}}}});
+    let watcher=tokio::spawn(async move {loop{tokio::select!{_ = stop(watch_rx.clone())=>break,_=tokio::time::sleep(Duration::from_secs(watch_config.poll_seconds))=>{match watch_engine.reload().await{Ok(true)=>tracing::info!("External state reloaded"),Ok(false)=>{},Err(e)=>tracing::error!(error=%e,"External state rejected; retaining valid state")}}}}});
     tracing::info!(version=env!("CARGO_PKG_VERSION"),cpu=config.cpu_count,memory_mb=config.memory_mb,"API service started");
     let mut failure=None;let mut api_done=false;let mut admin_done=false;
     tokio::select!{r=signal()=>{if let Err(e)=r{failure=Some(e);}},r=&mut api_task=>{api_done=true;failure=Some(anyhow::anyhow!("HTTP server exited: {r:?}"));},r=&mut admin_task=>{admin_done=true;failure=Some(anyhow::anyhow!("Administration server exited: {r:?}"));}}
@@ -176,6 +195,7 @@ async fn admin_connection(socket:UnixStream,engine:Engine)->Result<()> {
 fn required<'a>(value:&'a Value,key:&str)->Result<&'a str>{value.get(key).and_then(Value::as_str).with_context(||format!("Missing {key}"))}
 async fn admin_command(engine:&Engine,cmd:Value)->Result<Value>{
     let op=required(&cmd,"op")?;
+    for key in ["project","target"] { if cmd.get(key).is_some_and(|v|!v.is_null() && !v.is_string()) { bail!("Invalid {key}: expected a string"); } }
     let result=match op {
       "network.list"=>engine.snapshot(),
       "network.remove"=>{let n=engine.remove(required(&cmd,"system")?,cmd.get("project").and_then(Value::as_str),cmd.get("target").and_then(Value::as_str),cmd.get("id").filter(|v|!v.is_null())).await?;json!({"removed":n})},
@@ -186,7 +206,7 @@ async fn admin_command(engine:&Engine,cmd:Value)->Result<Value>{
       "check"=>json!({"status":"ok","version":env!("CARGO_PKG_VERSION")}),
       _=>bail!("Unknown administration operation"),
     };
-    if op!="network.list" && op!="token.list" && op!="check" {tracing::info!(operation=op,system=cmd.get("system").and_then(Value::as_str).unwrap_or(""),"Administration command completed");}
+    if op!="network.list" && op!="token.list" && op!="check" {tracing::info!(operation=op,system=cmd.get("system").and_then(serde_json::Value::as_str).unwrap_or(""),"Administration command completed");}
     Ok(result)
 }
 pub fn admin_request(path:&Path,command:Value,max_response:usize)->Result<Value>{
@@ -199,4 +219,19 @@ pub fn admin_request(path:&Path,command:Value,max_response:usize)->Result<Value>
     let output:Value=serde_json::from_slice(&bytes)?;
     if output.get("ok")!=Some(&Value::Bool(true)){bail!("{}",output.get("error").and_then(Value::as_str).unwrap_or("Administration command failed"));}
     Ok(output["result"].clone())
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use super::*;
+
+    #[test]
+    fn message_logging_keeps_normal_details_and_bounds_large_utf8_strings() {
+        assert_eq!(bounded_log_message(Some(&json!("all systems reachable"))),"all systems reachable");
+        let message=json!("€".repeat(10_000));
+        let logged=bounded_log_message(Some(&message));
+        assert!(logged.len()<=16*1024+"...[truncated]".len());
+        assert!(logged.ends_with("...[truncated]"));
+        assert_eq!(bounded_log_message(Some(&json!({"nested":"secret"}))),"[non-string message]");
+    }
 }
