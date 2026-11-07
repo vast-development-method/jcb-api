@@ -711,7 +711,10 @@ mod socket_tests {
 
         let listener = bind_socket(&path, 0o600).await.unwrap();
 
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let _connection = UnixStream::connect(&path).await.unwrap();
         drop(listener);
     }

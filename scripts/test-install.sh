@@ -86,6 +86,30 @@ reject RELEASE_VERSION '../main'
 reject UNSUPPORTED_KEY value
 reject ENABLE_HTTPS true
 reject MAX_STATE_BYTES 999999999
+reject MAX_STATE_BYTES 50331648
+
+# State creation is never performed by root in a service-writable directory.
+# Exercise the exact publication helper: it refuses both existing and dangling
+# links, creates private files, and never overwrites an existing record.
+source scripts/install.sh
+mkdir "$TEST_DIR/state" "$TEST_DIR/outside"
+printf 'private sentinel\n' > "$TEST_DIR/outside/existing"
+ln -s "$TEST_DIR/outside/existing" "$TEST_DIR/state/cache.json"
+if printf '{"systems":[]}' | seed_state_file "$TEST_DIR/state/cache.json"; then
+    printf 'State helper followed an existing symlink\n' >&2; exit 1
+fi
+require_text "$TEST_DIR/outside/existing" 'private sentinel'
+rm "$TEST_DIR/state/cache.json"
+ln -s "$TEST_DIR/outside/not-created" "$TEST_DIR/state/tokens.json"
+if printf '{}' | seed_state_file "$TEST_DIR/state/tokens.json"; then
+    printf 'State helper followed a dangling symlink\n' >&2; exit 1
+fi
+[[ ! -e $TEST_DIR/outside/not-created ]] || { printf 'Dangling target was created\n' >&2; exit 1; }
+rm "$TEST_DIR/state/tokens.json"
+printf '{"systems":[]}' | seed_state_file "$TEST_DIR/state/cache.json"
+[[ $(stat -c '%a' "$TEST_DIR/state/cache.json") == 600 ]] || { printf 'State permissions are not private\n' >&2; exit 1; }
+printf 'do not overwrite' | seed_state_file "$TEST_DIR/state/cache.json"
+[[ $(<"$TEST_DIR/state/cache.json") == '{"systems":[]}' ]] || { printf 'Existing state was overwritten\n' >&2; exit 1; }
 
 # Optional native parser validation in CI environments that install nginx.
 if command -v nginx >/dev/null 2>&1; then
