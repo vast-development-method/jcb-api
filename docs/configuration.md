@@ -40,7 +40,7 @@ that reconfiguration can regenerate Nginx/systemd consistently.
 Paths must be absolute and contain only letters, digits, `_`, `.`, `-`, and `/`.
 The installer rejects spaces, traversal, symlinks where a regular configuration
 file is required, and nested/overlapping release, state and configuration
-locations. Release/configuration ancestry must also be root-owned, non-symlink,
+locations. Release/configuration ancestry and the state directory's parents must be root-owned, non-symlink,
 and not group/world writable; a writable home directory is not suitable for
 trusted code or updater configuration. The application can use filesystem paths through runtime options;
 these bootstrap restrictions make generated shell/systemd/Nginx configuration
@@ -89,7 +89,8 @@ For a 512 MiB allocation, the installer sets the service memory maximum to
 256 MiB and a pressure threshold below that. The remainder is available to the
 kernel, Nginx and other necessary system services. The default maximum state file
 size is 8 MiB at this allocation, leaving room for prepared responses and other
-working memory. Increase the allocation and
+working memory. An explicit maximum may not exceed one sixteenth of the total
+allocation (32 MiB at 512 MiB). Increase the allocation and
 reconfigure when moving to a larger server; do not set it to the host's entire
 physical memory when other workloads need a share.
 

@@ -306,12 +306,17 @@ cargo test --locked --all-targets
 cargo build --locked --release
 bash scripts/ci-smoke.sh target/release/jcb-api
 bash scripts/test-install.sh
+bash scripts/test-nginx.sh target/release/jcb-api
 bash scripts/test-release-plan.sh
 ```
 
+The Nginx integration check requires the distribution's Nginx package. Checks use
+temporary local instances and never contact the production API.
+
 CI verifies the public API, dynamic growth, durable mutations, token lifecycle,
 local administration, documentation, migration behavior, installer rendering,
-signature verification, and release/backfill tag validation. Release builds cover x86-64 and ARM64 Linux with
+Nginx token rejection and a 100-call burst, signature verification, and
+release/backfill tag validation. Release builds cover x86-64 and ARM64 Linux with
 musl. CI uses temporary keys for signing tests; production keys are never used in
 pull-request jobs. See [maintainer release setup](docs/releasing.md) for versioned
 publishing and backfill builds. The repository's [LICENSE](LICENSE) applies.
