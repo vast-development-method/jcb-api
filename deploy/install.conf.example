@@ -1,0 +1,36 @@
+# Copy this file, enter the real domain/email and path to the trusted release key,
+# then run: sudo bash scripts/install.sh --config ./install.conf --non-interactive
+# Configuration is literal KEY=VALUE data. It is never evaluated as shell code.
+REPOSITORY=vast-development-method/jcb-api
+DOMAIN=api.example.org
+INSTALL_DIR=/opt/jcb-api
+STATE_DIR=/var/lib/jcb-api
+CONFIG_DIR=/etc/jcb-api
+SERVICE_NAME=jcb-api
+SERVICE_USER=jcb-api
+NGINX_GROUP=www-data
+# Obtain this public key from the maintainer through a trusted channel.
+PUBLIC_KEY_FILE=/etc/jcb-api/release-public.pem
+SERVER_MEMORY_MB=512
+SERVER_CPU_COUNT=2
+ENABLE_HTTPS=true
+ACME_EMAIL=admin@example.org
+AUTO_UPDATE=true
+UPDATE_INTERVAL=15min
+RELEASE_VERSION=latest
+# Optional path to an existing Flask installation's .env. The installer copies
+# its cache and tokens to STATE_DIR if they are absent. Originals/logs stay intact.
+LEGACY_ENV_FILE=
+NETWORK_RATE=100
+NETWORK_BURST=500
+WEBHOOK_RATE=10
+WEBHOOK_BURST=50
+# Leave blank for direct connections. Only list actual trusted proxy networks.
+# Comma-separated IPs/CIDRs; never trust arbitrary X-Forwarded-For headers.
+TRUSTED_PROXY_CIDRS=
+LOG_NETWORK_REQUESTS=true
+LOG_QUEUE_CAPACITY=8192
+MAX_CONTENT_LENGTH=1048576
+# Default derived from memory allowance; reduce it for very small datasets.
+MAX_STATE_BYTES=
+POLL_INTERVAL_SECONDS=5

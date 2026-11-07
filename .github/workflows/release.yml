@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and publish (backfill)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Validate release source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve existing version tag on main history
+        id: source
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == workflow_dispatch && "$WORKFLOW_REF" != refs/heads/main ]]; then
+            echo 'Backfill must be dispatched from the main branch.' >&2
+            exit 1
+          fi
+          [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          release_sha=$(git rev-parse --verify "refs/tags/$REQUESTED_TAG^{commit}")
+          git merge-base --is-ancestor "$release_sha" origin/main
+          printf 'tag=%s\nsha=%s\n' "$REQUESTED_TAG" "$release_sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build release (${{ matrix.target }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Install native musl compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-release-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Validate and build tagged source
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          test -f Cargo.lock
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --all-targets
+          bash scripts/release-package.sh "$RELEASE_TARGET"
+          bash scripts/ci-smoke.sh "dist/jcb-api-$RELEASE_TARGET"
+          bash scripts/test-install.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/jcb-api-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Sign and publish verified release
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+      - name: Sign the release manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_PUBLIC_KEY: ${{ vars.RELEASE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$RELEASE_SIGNING_KEY" && -n "$RELEASE_PUBLIC_KEY" ]] || {
+            echo 'Configure RELEASE_SIGNING_KEY secret and RELEASE_PUBLIC_KEY variable before publishing.' >&2
+            exit 1
+          }
+          umask 077
+          signing_dir=$(mktemp -d)
+          trap 'rm -rf -- "$signing_dir"' EXIT
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_dir/private.pem"
+          printf '%s\n' "$RELEASE_PUBLIC_KEY" > "$signing_dir/public.pem"
+          cd dist
+          test -s jcb-api-x86_64-unknown-linux-musl
+          test -s jcb-api-aarch64-unknown-linux-musl
+          sha256sum jcb-api-aarch64-unknown-linux-musl jcb-api-x86_64-unknown-linux-musl > SHA256SUMS
+          openssl pkeyutl -sign -rawin -inkey "$signing_dir/private.pem" -in SHA256SUMS -out SHA256SUMS.sig
+          openssl pkeyutl -verify -pubin -rawin -inkey "$signing_dir/public.pem" -in SHA256SUMS -sigfile SHA256SUMS.sig
+          sha256sum --check SHA256SUMS
+          cp "$signing_dir/public.pem" release-public.pem
+      - name: Publish only after every artifact is signed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          if existing_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [[ "$existing_draft" != true ]]; then
+              echo 'This version is already published. Signed public assets are never overwritten.' >&2
+              exit 1
+            fi
+            echo 'Resuming an unpublished draft release.'
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "JCB API $RELEASE_TAG" \
+              --generate-notes "${release_flags[@]}"
+          fi
+          gh release upload "$RELEASE_TAG" --clobber \
+            dist/jcb-api-x86_64-unknown-linux-musl \
+            dist/jcb-api-aarch64-unknown-linux-musl \
+            dist/SHA256SUMS dist/SHA256SUMS.sig dist/release-public.pem
+          gh release edit "$RELEASE_TAG" --draft=false

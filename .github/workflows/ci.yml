@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feature/**', 'fix/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: API, CLI, migration, and installer checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install stable Rust components
+        run: rustup show && rustup component add rustfmt clippy
+      - name: Install deployment validation tools
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends nginx
+      - name: Bootstrap the initial lockfile
+        if: ${{ hashFiles('Cargo.lock') == '' }}
+        run: |
+          cargo generate-lockfile
+          echo '::group::LOCKFILE_BOOTSTRAP'
+          cat Cargo.lock
+          echo '::endgroup::'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-check-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Formatting
+        id: formatting
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Unit and integration tests
+        id: tests
+        continue-on-error: true
+        run: cargo test --locked --all-targets
+      - name: CLI, migration, and signing smoke test
+        id: smoke
+        continue-on-error: true
+        run: |
+          cargo build --locked
+          bash scripts/ci-smoke.sh target/debug/jcb-api
+      - name: Installer rendering and validation
+        id: installer
+        continue-on-error: true
+        run: bash scripts/test-install.sh
+      - name: Expose formatting changes for review
+        if: steps.formatting.outcome == 'failure'
+        run: |
+          cargo fmt --all
+          git diff -- '*.rs'
+      - name: Retain lockfile and smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-diagnostics
+          path: |
+            Cargo.lock
+            target/ci-smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Require every check to pass
+        if: always()
+        env:
+          FORMATTING: ${{ steps.formatting.outcome }}
+          CLIPPY: ${{ steps.clippy.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+          SMOKE: ${{ steps.smoke.outcome }}
+          INSTALLER: ${{ steps.installer.outcome }}
+        run: |
+          for outcome in "$FORMATTING" "$CLIPPY" "$TESTS" "$SMOKE" "$INSTALLER"; do
+            [[ "$outcome" == success ]] || exit 1
+          done
+
+  portable-build:
+    name: Portable release build (${{ matrix.target }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install native musl compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Bootstrap the initial lockfile
+        if: ${{ hashFiles('Cargo.lock') == '' }}
+        run: cargo generate-lockfile
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-musl-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Build and exercise release binary
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          bash scripts/release-package.sh "$RELEASE_TARGET"
+          bash scripts/ci-smoke.sh "dist/jcb-api-$RELEASE_TARGET"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-${{ matrix.target }}
+          path: dist/jcb-api-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
