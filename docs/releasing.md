@@ -85,9 +85,14 @@ commit reachable from `main`, and
 its package version must match. It does not allow publishing arbitrary branch
 artifacts or silently overwriting an existing release.
 
+Publication uses GitHub's legacy semantic-version policy for selecting the
+latest stable release, so publishing a backfill does not automatically promote
+it merely because it was the most recent workflow run.
+
 CI exercises builds and signature checks with temporary test keys. Those keys are
-never trusted by production installers. Successful PR checks therefore establish
-that the release path works without exposing the production signing key.
+never trusted by production installers. PR checks exercise packaging, signature
+interoperability, and release-selection logic without production credentials.
+Publishing with the real signing key is a separate run after maintainer setup.
 
 ## Manual verification
 
