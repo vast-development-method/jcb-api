@@ -8,6 +8,36 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Required command is missing: $1"; }
 
+# Call only as the unprivileged service account. Publishing by hard link is
+# atomic and never overwrites an existing file, including a dangling symlink.
+# Even if the service concurrently changes its directory, every I/O operation
+# here runs with its permissions rather than the installer's root privileges.
+seed_state_file() {
+    local target=$1 temporary
+    if [[ -L $target ]]; then
+        printf 'Refusing symlink state file: %s\n' "$target" >&2
+        return 1
+    fi
+    if [[ -e $target ]]; then
+        [[ -f $target ]] || { printf 'State target is not a regular file\n' >&2; return 1; }
+        return 0
+    fi
+    temporary=$(mktemp -- "$(dirname -- "$target")/.bootstrap-XXXXXX") || return 1
+    if ! cat > "$temporary"; then rm -f -- "$temporary"; return 1; fi
+    chmod 0600 "$temporary"
+    if ln -T -- "$temporary" "$target" 2>/dev/null; then
+        rm -f -- "$temporary"
+        return 0
+    fi
+    rm -f -- "$temporary"
+    # Another publisher may have won the race. Keep its regular file unchanged.
+    [[ -f $target && ! -L $target ]]
+}
+
+# Sourcing exposes only the safe publication helper to offline regression tests.
+# It never starts the installer or changes the host.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return 0; fi
+
 CONFIG_FILE=''
 RENDER_DIR=''
 NON_INTERACTIVE=false
@@ -154,7 +184,7 @@ SERVICE_MEMORY_MB=$((SERVER_MEMORY_MB / 2))
 MEMORY_HIGH_MB=$((SERVICE_MEMORY_MB * 4 / 5))
 [[ -n $MAX_STATE_BYTES ]] || MAX_STATE_BYTES=$((SERVICE_MEMORY_MB * 1024 * 1024 / 32))
 number MAX_STATE_BYTES 4096 1073741824
-((MAX_STATE_BYTES <= SERVICE_MEMORY_MB * 1024 * 1024 / 4)) || die 'MAX_STATE_BYTES must leave memory for prepared responses, requests and logging'
+((MAX_STATE_BYTES <= SERVER_MEMORY_MB * 1024 * 1024 / 16)) || die 'MAX_STATE_BYTES must not exceed one sixteenth of SERVER_MEMORY_MB (space is needed for prepared responses, requests and logging)'
 RUNTIME_DIR="/run/$SERVICE_NAME"
 API_SOCKET_PATH="$RUNTIME_DIR/api.sock"
 ADMIN_SOCKET_PATH="$RUNTIME_DIR/admin.sock"
@@ -387,7 +417,7 @@ need curl; need jq; need openssl; need sha256sum; need flock
 
 # Release/config parents must not allow the runtime account (or another ordinary
 # user) to replace a path later traversed by the root-owned updater.
-for secure_path in "$INSTALL_DIR" "$CONFIG_DIR"; do
+for secure_path in "$INSTALL_DIR" "$CONFIG_DIR" "$(dirname -- "$STATE_DIR")"; do
     [[ $(realpath -m -- "$secure_path") == "$secure_path" ]] || die "Symlink components are not allowed in $secure_path"
     ancestor=$secure_path
     while [[ ! -e $ancestor ]]; do ancestor=$(dirname -- "$ancestor"); done
@@ -469,20 +499,28 @@ if [[ -n $LEGACY_ENV_FILE ]]; then
 fi
 for kind in cache tokens; do
     target="$STATE_DIR/$kind.json"
+    [[ ! -L $target ]] || die "Refusing symlink state file: $target"
     if [[ -e $target ]]; then
-        [[ -f $target && ! -L $target ]] || die "Refusing non-regular state file: $target"
+        [[ -f $target ]] || die "Refusing non-regular state file: $target"
         note "Preserving existing $kind data"
     else
         if [[ $kind == cache ]]; then source=$LEGACY_CACHE; else source=$LEGACY_TOKENS; fi
         if [[ -n $source ]]; then
             [[ -f $source && ! -L $source ]] || die "Migration source must be a regular file: $source"
-            jq -e 'type == "object"' "$source" >/dev/null || die "Invalid JSON object in $source"
-            install -m 0600 -o "$SERVICE_USER" -g "$NGINX_GROUP" "$source" "$target"
+            [[ $source != "$STATE_DIR/"* ]] || die 'Legacy migration sources must be outside the new service-owned state directory'
+            # Open the legacy leaf without following a symlink, and validate the
+            # resulting root-private snapshot rather than reopening the source.
+            dd if="$source" of="$TEMP_DIR/$kind.seed.json" iflag=nofollow conv=excl status=none
+            jq -e 'type == "object"' "$TEMP_DIR/$kind.seed.json" >/dev/null || die "Invalid JSON object in $source"
         else
-            if [[ $kind == cache ]]; then printf '{"systems":[]}\n' > "$target"; else printf '{}\n' > "$target"; fi
-            chown "$SERVICE_USER:$NGINX_GROUP" "$target"
-            chmod 0600 "$target"
+            if [[ $kind == cache ]]; then printf '{"systems":[]}\n' > "$TEMP_DIR/$kind.seed.json"; else printf '{}\n' > "$TEMP_DIR/$kind.seed.json"; fi
         fi
+        # Only the service account touches files inside its mutable directory.
+        # Root opens the private input before dropping privileges; no secret path
+        # or untrusted content is interpolated into executable shell code.
+        runuser -u "$SERVICE_USER" -g "$NGINX_GROUP" -- /bin/bash -c \
+            "$(declare -f seed_state_file); seed_state_file \"\$1\"" \
+            seed-state "$target" < "$TEMP_DIR/$kind.seed.json"
     fi
 done
 

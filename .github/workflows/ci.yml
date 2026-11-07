@@ -60,6 +60,10 @@ jobs:
         id: installer
         continue-on-error: true
         run: bash scripts/test-install.sh
+      - name: Nginx edge routing and compilation burst
+        id: nginx
+        continue-on-error: true
+        run: bash scripts/test-nginx.sh target/debug/jcb-api
       - name: Release and backfill planning
         id: release_plan
         continue-on-error: true
@@ -77,6 +81,7 @@ jobs:
           path: |
             Cargo.lock
             target/ci-smoke.log
+            target/ci-nginx.log
           if-no-files-found: ignore
           retention-days: 7
       - name: Save compiled dependencies even after a failed check
@@ -97,8 +102,9 @@ jobs:
           SMOKE: ${{ steps.smoke.outcome }}
           INSTALLER: ${{ steps.installer.outcome }}
           RELEASE_PLAN: ${{ steps.release_plan.outcome }}
+          NGINX: ${{ steps.nginx.outcome }}
         run: |
-          for outcome in "$FORMATTING" "$CLIPPY" "$TESTS" "$SMOKE" "$INSTALLER" "$RELEASE_PLAN"; do
+          for outcome in "$FORMATTING" "$CLIPPY" "$TESTS" "$SMOKE" "$INSTALLER" "$RELEASE_PLAN" "$NGINX"; do
             [[ "$outcome" == success ]] || exit 1
           done
 

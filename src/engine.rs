@@ -1035,7 +1035,10 @@ mod tests {
         assert_eq!(decode(empty.clone()), json!({"target":"t","network":[]}));
         assert_eq!(
             empty.as_ptr(),
-            engine.empty_status_response("s", "p", "t").unwrap().as_ptr()
+            engine
+                .empty_status_response("s", "p", "t")
+                .unwrap()
+                .as_ptr()
         );
         assert_eq!(
             engine.empty_status_response("s", "p", "missing"),

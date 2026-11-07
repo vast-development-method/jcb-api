@@ -762,7 +762,10 @@ mod tests {
         assert_eq!(fs::metadata(&private)?.permissions().mode() & 0o777, 0o600);
         let private_pem = fs::read_to_string(&private)?;
         let encoded = ed25519_dalek::pkcs8::KeypairBytes::from_pkcs8_pem(&private_pem)?;
-        assert!(encoded.public_key.is_none(), "Private keys must use PKCS#8 v1");
+        assert!(
+            encoded.public_key.is_none(),
+            "Private keys must use PKCS#8 v1"
+        );
         let decoded = SigningKey::from_pkcs8_pem(&private_pem)?;
         let public_pem = fs::read_to_string(&public)?;
         assert_eq!(

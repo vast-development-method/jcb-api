@@ -157,4 +157,8 @@ jobs:
             dist/jcb-api-x86_64-unknown-linux-musl \
             dist/jcb-api-aarch64-unknown-linux-musl \
             dist/SHA256SUMS dist/SHA256SUMS.sig dist/release-public.pem
-          gh release edit "$RELEASE_TAG" --draft=false
+          release_id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq '.id')
+          # Let GitHub select latest using stable semantic versions and dates;
+          # publishing an older backfill must not promote it over a newer version.
+          gh api --method PATCH "repos/$GH_REPO/releases/$release_id" \
+            -F draft=false -f make_latest=legacy > /dev/null
