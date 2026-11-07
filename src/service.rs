@@ -201,9 +201,14 @@ async fn public_inner(state: &AppState, req: Request) -> Response {
             }
         } else {
             // Python accepts arbitrarily large integers; these match no stored status.
-            let mut value: Value = serde_json::from_slice(&base).expect("validated snapshot");
-            value["network"] = json!([]);
-            Bytes::from(value.to_string())
+            match state.engine.empty_status_response(
+                system.expect("status route has a system"),
+                project.expect("status route has a project"),
+                target.expect("status route has a target"),
+            ) {
+                Ok(v) => v,
+                Err(e) => return error(StatusCode::FORBIDDEN, &e.to_string()),
+            }
         }
     } else {
         base
@@ -407,7 +412,7 @@ impl axum::serve::Listener for LimitedListener {
         self.listener.local_addr()
     }
 }
-fn bind_socket(path: &Path, mode: u32) -> Result<UnixListener> {
+async fn bind_socket(path: &Path, mode: u32) -> Result<UnixListener> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -416,7 +421,13 @@ fn bind_socket(path: &Path, mode: u32) -> Result<UnixListener> {
             if !metadata.file_type().is_socket() {
                 bail!("Refusing to replace non-socket {}", path.display());
             }
-            match std::os::unix::net::UnixStream::connect(path) {
+            // A live listener with a full backlog must not block startup's
+            // runtime thread. Only a definite refusal permits stale cleanup;
+            // a timeout or any other error preserves the existing socket.
+            let probe = tokio::time::timeout(Duration::from_secs(2), UnixStream::connect(path))
+                .await
+                .with_context(|| format!("Timed out checking socket {}", path.display()))?;
+            match probe {
                 Ok(_) => bail!("Socket {} is already in use", path.display()),
                 Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {}
                 Err(e) => {
@@ -466,8 +477,8 @@ pub async fn serve(config: Config) -> Result<()> {
         config.max_state_bytes,
     )?;
     let state = AppState::new(engine.clone(), config.clone())?;
-    let api = bind_socket(&config.api_socket, 0o660)?;
-    let admin = bind_socket(&config.admin_socket, 0o600)?;
+    let api = bind_socket(&config.api_socket, 0o660).await?;
+    let admin = bind_socket(&config.admin_socket, 0o600).await?;
     let (tx, rx) = watch::channel(false);
     let mut api_task = tokio::spawn(
         axum::serve(
@@ -668,5 +679,52 @@ mod logging_tests {
             bounded_log_message(Some(&json!({"nested":"secret"}))),
             "[non-string message]"
         );
+    }
+}
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[tokio::test]
+    async fn live_socket_is_preserved_and_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("live.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let inode = fs::symlink_metadata(&path).unwrap().ino();
+
+        let error = bind_socket(&path, 0o600).await.unwrap_err();
+
+        assert!(error.to_string().contains("already in use"));
+        assert_eq!(fs::symlink_metadata(&path).unwrap().ino(), inode);
+        let _connection = UnixStream::connect(&path).await.unwrap();
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn refused_stale_socket_is_rebound_with_requested_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("stale.sock");
+        drop(UnixListener::bind(&path).unwrap());
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_socket());
+
+        let listener = bind_socket(&path, 0o600).await.unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let _connection = UnixStream::connect(&path).await.unwrap();
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn existing_regular_file_is_never_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("protected.sock");
+        fs::write(&path, b"preserve this file").unwrap();
+
+        let error = bind_socket(&path, 0o600).await.unwrap_err();
+
+        assert!(error.to_string().contains("Refusing to replace non-socket"));
+        assert_eq!(fs::read(&path).unwrap(), b"preserve this file");
     }
 }
