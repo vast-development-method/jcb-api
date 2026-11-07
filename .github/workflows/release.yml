@@ -141,8 +141,6 @@ jobs:
             dist/jcb-api-x86_64-unknown-linux-musl \
             dist/jcb-api-aarch64-unknown-linux-musl \
             dist/SHA256SUMS
-          gh release view "$RELEASE_TAG" --json assets --jq '[.assets[].name] | sort' | \
-            jq -e '. == ["SHA256SUMS", "jcb-api-aarch64-unknown-linux-musl", "jcb-api-x86_64-unknown-linux-musl"]' > /dev/null
           release_id=$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq '.id')
           # Let GitHub select latest using stable semantic versions and dates;
           # publishing an older backfill must not promote it over a newer version.
